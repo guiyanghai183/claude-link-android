@@ -1,0 +1,121 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+            android/app/*.gradle.kts
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Validate release secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for value in "$KEYSTORE_BASE64" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD"; do
+            if [ -z "$value" ]; then
+              echo "A required Android signing secret is missing. See docs/GITHUB_RELEASES.md."
+              exit 1
+            fi
+          done
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/release.keystore
+
+      - name: Test server bridge
+        run: python3 -m unittest discover -s server/tests -v
+
+      - name: Build signed release APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --console=plain -PGITHUB_REPOSITORY="$GITHUB_REPOSITORY"
+
+      - name: Prepare release assets
+        id: assets
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          METADATA=android/app/build/outputs/apk/release/output-metadata.json
+          VERSION_CODE=$(jq -r '.elements[0].versionCode' "$METADATA")
+          VERSION_NAME=$(jq -r '.elements[0].versionName' "$METADATA")
+          if [ "$TAG_NAME" != "v$VERSION_NAME" ]; then
+            echo "Tag $TAG_NAME must match Android versionName v$VERSION_NAME."
+            exit 1
+          fi
+          APK_NAME="ClaudeLink-$TAG_NAME.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "$APK_NAME"
+          SHA256=$(sha256sum "$APK_NAME" | awk '{print $1}')
+          printf '%s  %s\n' "${SHA256^^}" "$APK_NAME" > SHA256SUMS.txt
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
+            --arg sha256 "$SHA256" \
+            --arg releaseNotes "视频交付工具稳定化；修复多会话串线和断线重复发送；新增服务器文件浏览、图片/视频预览与免费系统语音转文字；优化输入法间距。" \
+            '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
+            > latest.json
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Verify APK signature
+        env:
+          APK_NAME: ${{ steps.assets.outputs.apk_name }}
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "apksigner was not found in the Android SDK."
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose --print-certs "$APK_NAME"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK_NAME: ${{ steps.assets.outputs.apk_name }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "$APK_NAME" SHA256SUMS.txt latest.json \
+            --title "Claude Link $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f android/release.keystore

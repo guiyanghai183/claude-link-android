@@ -1,0 +1,12 @@
+[Unit]
+Description=Mobile Claude loopback bridge
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/share/mobile-claude/server.py --host 127.0.0.1 --port 18765
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
