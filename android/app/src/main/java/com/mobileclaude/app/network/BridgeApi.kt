@@ -14,6 +14,7 @@ import com.mobileclaude.app.data.HealthInfo
 import com.mobileclaude.app.data.RemoteDirectory
 import com.mobileclaude.app.data.RemoteFileEntry
 import com.mobileclaude.app.data.RemoteFileListing
+import com.mobileclaude.app.data.TerminalCommandReceipt
 import com.mobileclaude.app.data.WebAttachment
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,13 +46,53 @@ class BridgeApi(private val localPort: Int) {
         .getJSONArray("chats")
         .mapObjects(::parseChat)
 
-    fun createChat(projectPath: String, clientChatId: String): ChatSummary = parseChat(
+    fun createChat(projectPath: String, clientChatId: String, mode: String): ChatSummary = parseChat(
         request(
             "POST",
             "/v1/chats",
-            JSONObject().put("projectPath", projectPath).put("clientChatId", clientChatId),
+            JSONObject()
+                .put("projectPath", projectPath)
+                .put("clientChatId", clientChatId)
+                .put("mode", mode),
         )
     )
+
+    fun startTerminalCommand(
+        chatId: String,
+        command: String,
+        clientCommandId: String,
+    ): TerminalCommandReceipt {
+        val json = request(
+            "POST",
+            "/v1/chats/$chatId/terminal/commands",
+            JSONObject()
+                .put("command", command)
+                .put("clientCommandId", clientCommandId),
+        )
+        return TerminalCommandReceipt(
+            inputMessageId = json.getLong("inputMessageId"),
+            outputMessageId = json.getLong("outputMessageId"),
+        )
+    }
+
+    fun prepareTerminalChat(chatId: String) {
+        request("POST", "/v1/chats/$chatId/terminal/open", JSONObject())
+    }
+
+    fun updateTerminalOutput(
+        chatId: String,
+        messageId: Long,
+        content: String,
+        complete: Boolean,
+    ) {
+        request(
+            "PATCH",
+            "/v1/chats/$chatId/terminal/outputs/$messageId",
+            JSONObject()
+                .put("content", content)
+                .put("status", if (complete) "complete" else "streaming"),
+        )
+    }
 
     fun getChat(chatId: String): ChatDetail {
         val json = request("GET", "/v1/chats/$chatId")
@@ -325,6 +366,7 @@ class BridgeApi(private val localPort: Int) {
         id = json.getString("id"),
         title = json.getString("title"),
         projectPath = json.getString("projectPath"),
+        mode = json.optString("mode", "claude"),
         createdAt = json.optString("createdAt"),
         updatedAt = json.optString("updatedAt"),
         pinned = json.optBoolean("pinned"),

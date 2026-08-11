@@ -38,11 +38,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.3.7"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_WEB_CONTEXT_CHARS = 300_000
+CHAT_MODES = {"claude", "terminal"}
+MAX_TERMINAL_COMMAND_CHARS = 16_000
+MAX_TERMINAL_OUTPUT_CHARS = 120_000
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 DOCUMENT_EXTENSIONS = {".pdf", ".csv", ".tsv", ".json", ".html"}
 # Local artifacts must be independently playable files. HLS/DASH URLs remain
@@ -358,6 +361,7 @@ class Store:
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     project_path TEXT NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'claude',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     pinned INTEGER NOT NULL DEFAULT 0,
@@ -408,6 +412,11 @@ class Store:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_id "
                 "ON messages(chat_id, client_message_id) WHERE client_message_id IS NOT NULL"
             )
+            chat_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(chats)").fetchall()
+            }
+            if "mode" not in chat_columns:
+                conn.execute("ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'claude'")
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_claude_sessions_active "
                 "ON claude_sessions(chat_id) WHERE active=1"
@@ -426,7 +435,7 @@ class Store:
         """Give pre-0.3.4 chats a fresh isolated Claude session exactly once."""
         rows = conn.execute(
             "SELECT id,project_path,created_at FROM chats "
-            "WHERE NOT EXISTS ("
+            "WHERE mode='claude' AND NOT EXISTS ("
             "SELECT 1 FROM claude_sessions WHERE chat_id=chats.id AND active=1"
             ")"
         ).fetchall()
@@ -458,8 +467,16 @@ class Store:
         """Make chats usable after a bridge/host crash interrupted a turn."""
         with self._write_lock:
             conn = self.connection()
+            conn.execute(
+                "UPDATE messages SET status='complete' "
+                "WHERE kind='terminal_output' AND status='streaming'"
+            )
             rows = conn.execute("SELECT id FROM chats WHERE status='running'").fetchall()
             if not rows:
+                # Even an UPDATE that matches zero rows opens a SQLite write
+                # transaction.  Commit it so HTTP worker connections are not
+                # blocked behind the startup connection on a fresh database.
+                conn.commit()
                 return 0
             chat_ids = [str(row["id"]) for row in rows]
             placeholders = ",".join("?" for _ in chat_ids)
@@ -503,23 +520,34 @@ class Store:
         project_path: str,
         title: str = "新对话",
         chat_id: str | None = None,
+        mode: str = "claude",
     ) -> dict[str, Any]:
+        if mode not in CHAT_MODES:
+            raise ValueError("对话类型无效")
         chat_id = chat_id or str(uuid.uuid4())
-        session_id = str(uuid.uuid4())
         current = now_ts()
         with self._write_lock:
             conn = self.connection()
             if conn.execute("SELECT 1 FROM chats WHERE id=?", (chat_id,)).fetchone() is not None:
                 return self.get_chat(chat_id)
             conn.execute(
-                "INSERT INTO chats(id,title,project_path,created_at,updated_at) VALUES(?,?,?,?,?)",
-                (chat_id, title.strip()[:80] or "新对话", project_path, current, current),
+                "INSERT INTO chats(id,title,project_path,mode,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    chat_id,
+                    title.strip()[:80] or ("新终端" if mode == "terminal" else "新对话"),
+                    project_path,
+                    mode,
+                    current,
+                    current,
+                ),
             )
-            conn.execute(
-                "INSERT INTO claude_sessions(id,chat_id,project_path,created_at,active) "
-                "VALUES(?,?,?,?,1)",
-                (session_id, chat_id, project_path, current),
-            )
+            if mode == "claude":
+                conn.execute(
+                    "INSERT INTO claude_sessions(id,chat_id,project_path,created_at,active) "
+                    "VALUES(?,?,?,?,1)",
+                    (str(uuid.uuid4()), chat_id, project_path, current),
+                )
             conn.commit()
         return self.get_chat(chat_id)
 
@@ -543,17 +571,20 @@ class Store:
         current = now_ts()
         with self._write_lock:
             conn = self.connection()
-            row = conn.execute("SELECT project_path FROM chats WHERE id=?", (chat_id,)).fetchone()
+            row = conn.execute(
+                "SELECT project_path,mode FROM chats WHERE id=?", (chat_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(chat_id)
             if row["project_path"] == project_path:
                 return self.get_chat(chat_id)
-            conn.execute("UPDATE claude_sessions SET active=0 WHERE chat_id=?", (chat_id,))
-            conn.execute(
-                "INSERT INTO claude_sessions(id,chat_id,project_path,created_at,active) "
-                "VALUES(?,?,?,?,1)",
-                (str(uuid.uuid4()), chat_id, project_path, current),
-            )
+            if row["mode"] == "claude":
+                conn.execute("UPDATE claude_sessions SET active=0 WHERE chat_id=?", (chat_id,))
+                conn.execute(
+                    "INSERT INTO claude_sessions(id,chat_id,project_path,created_at,active) "
+                    "VALUES(?,?,?,?,1)",
+                    (str(uuid.uuid4()), chat_id, project_path, current),
+                )
             conn.execute(
                 "UPDATE chats SET project_path=?,updated_at=?,status='idle',last_error=NULL WHERE id=?",
                 (project_path, current, chat_id),
@@ -586,6 +617,7 @@ class Store:
             "id": row["id"],
             "title": row["title"],
             "projectPath": row["project_path"],
+            "mode": row["mode"] if "mode" in keys else "claude",
             "createdAt": utc_iso(row["created_at"]),
             "updatedAt": utc_iso(row["updated_at"]),
             "pinned": bool(row["pinned"]),
@@ -688,6 +720,104 @@ class Store:
             self.connection().execute("UPDATE chats SET updated_at=? WHERE id=?", (current, chat_id))
             self.connection().commit()
             return int(cursor.lastrowid)
+
+    def add_terminal_command(
+        self,
+        chat_id: str,
+        command: str,
+        client_command_id: str,
+    ) -> tuple[int, int]:
+        if not command or len(command) > MAX_TERMINAL_COMMAND_CHARS:
+            raise ValueError("终端命令不能为空或过长")
+        output_client_id = f"{client_command_id}:output"
+        current = now_ts()
+        with self._write_lock:
+            conn = self.connection()
+            chat = conn.execute(
+                "SELECT mode,title FROM chats WHERE id=?", (chat_id,)
+            ).fetchone()
+            if chat is None:
+                raise KeyError(chat_id)
+            if chat["mode"] != "terminal":
+                raise ValueError("当前不是终端对话")
+            existing_input = conn.execute(
+                "SELECT id FROM messages WHERE chat_id=? AND client_message_id=?",
+                (chat_id, client_command_id),
+            ).fetchone()
+            existing_output = conn.execute(
+                "SELECT id FROM messages WHERE chat_id=? AND client_message_id=?",
+                (chat_id, output_client_id),
+            ).fetchone()
+            conn.execute(
+                "UPDATE messages SET status='complete' "
+                "WHERE chat_id=? AND kind='terminal_output' AND status='streaming'",
+                (chat_id,),
+            )
+            if existing_input is None:
+                input_cursor = conn.execute(
+                    "INSERT INTO messages(chat_id,role,kind,content,created_at,status,metadata,client_message_id) "
+                    "VALUES(?,?,'terminal_input',?,?,'complete','{}',?)",
+                    (chat_id, "user", command, current, client_command_id),
+                )
+                input_id = int(input_cursor.lastrowid)
+            else:
+                input_id = int(existing_input["id"])
+            if existing_output is None:
+                output_cursor = conn.execute(
+                    "INSERT INTO messages(chat_id,role,kind,content,created_at,status,metadata,client_message_id) "
+                    "VALUES(?,?,'terminal_output','',?,'streaming','{}',?)",
+                    (chat_id, "assistant", current, output_client_id),
+                )
+                output_id = int(output_cursor.lastrowid)
+            else:
+                output_id = int(existing_output["id"])
+            title = chat_title(command) if chat["title"] == "新终端" else chat["title"]
+            conn.execute(
+                "UPDATE chats SET title=?,updated_at=?,last_error=NULL WHERE id=?",
+                (title, current, chat_id),
+            )
+            conn.commit()
+        return input_id, output_id
+
+    def prepare_terminal_chat(self, chat_id: str) -> None:
+        with self._write_lock:
+            conn = self.connection()
+            chat = conn.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()
+            if chat is None:
+                raise KeyError(chat_id)
+            if chat["mode"] != "terminal":
+                raise ValueError("当前不是终端对话")
+            conn.execute(
+                "UPDATE messages SET status='complete' "
+                "WHERE chat_id=? AND kind='terminal_output' AND status='streaming'",
+                (chat_id,),
+            )
+            conn.commit()
+
+    def update_terminal_output(
+        self,
+        chat_id: str,
+        message_id: int,
+        content: str,
+        status: str,
+    ) -> None:
+        if len(content) > MAX_TERMINAL_OUTPUT_CHARS:
+            raise ValueError("终端输出过长")
+        if status not in {"streaming", "complete"}:
+            raise ValueError("终端输出状态无效")
+        current = now_ts()
+        with self._write_lock:
+            conn = self.connection()
+            cursor = conn.execute(
+                "UPDATE messages SET content=?,status=? "
+                "WHERE id=? AND chat_id=? AND kind='terminal_output'",
+                (content, status, message_id, chat_id),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise KeyError(message_id)
+            conn.execute("UPDATE chats SET updated_at=? WHERE id=?", (current, chat_id))
+            conn.commit()
 
     def message_id_for_client_id(self, chat_id: str, client_message_id: str) -> int | None:
         row = self.connection().execute(
@@ -1959,6 +2089,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             body = self._json_body()
             if parts == ["v1", "chats"]:
                 project = self.state.validate_project(str(body.get("projectPath") or Path.home()))
+                mode = str(body.get("mode") or "claude").strip().lower()
+                if mode not in CHAT_MODES:
+                    raise ValueError("对话类型必须是 claude 或 terminal")
                 raw_chat_id = str(body.get("clientChatId") or uuid.uuid4())
                 try:
                     client_chat_id = str(uuid.UUID(raw_chat_id))
@@ -1966,10 +2099,42 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     raise ValueError("clientChatId 必须是 UUID") from exc
                 chat = self.state.store.create_chat(
                     project,
-                    str(body.get("title") or "新对话"),
+                    str(body.get("title") or ("新终端" if mode == "terminal" else "新对话")),
                     chat_id=client_chat_id,
+                    mode=mode,
                 )
                 self._send_json(HTTPStatus.CREATED, chat)
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["v1", "chats"]
+                and parts[3:] == ["terminal", "commands"]
+            ):
+                command = str(body.get("command") or "")
+                raw_command_id = str(body.get("clientCommandId") or uuid.uuid4())
+                try:
+                    client_command_id = str(uuid.UUID(raw_command_id))
+                except ValueError as exc:
+                    raise ValueError("clientCommandId 必须是 UUID") from exc
+                input_id, output_id = self.state.store.add_terminal_command(
+                    parts[2], command, client_command_id
+                )
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    {
+                        "inputMessageId": input_id,
+                        "outputMessageId": output_id,
+                        "clientCommandId": client_command_id,
+                    },
+                )
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["v1", "chats"]
+                and parts[3:] == ["terminal", "open"]
+            ):
+                self.state.store.prepare_terminal_chat(parts[2])
+                self._send_json(HTTPStatus.OK, {"ready": True})
                 return
             if len(parts) == 4 and parts[:2] == ["v1", "chats"] and parts[3] == "messages":
                 self._post_message(parts[2], body)
@@ -2023,6 +2188,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             self.state.store.change_project(parts[2], project_path)
                 self._send_json(HTTPStatus.OK, self.state.store.update_chat(parts[2], **changes))
                 return
+            if (
+                len(parts) == 6
+                and parts[:2] == ["v1", "chats"]
+                and parts[3:5] == ["terminal", "outputs"]
+            ):
+                message_id = int(parts[5])
+                self.state.store.update_terminal_output(
+                    parts[2],
+                    message_id,
+                    str(body.get("content") or ""),
+                    str(body.get("status") or "streaming"),
+                )
+                self._send_json(HTTPStatus.OK, {"updated": True})
+                return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "接口不存在"})
         except Exception as exc:
             self._handle_error(exc)
@@ -2045,6 +2224,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._handle_error(exc)
 
     def _post_message(self, chat_id: str, body: dict[str, Any]) -> None:
+        if self.state.store.get_chat(chat_id)["mode"] != "claude":
+            raise ValueError("终端对话请使用远程终端输入框")
         text = str(body.get("text") or "").strip()
         attachments = body.get("attachments") or []
         raw_client_message_id = str(body.get("clientMessageId") or uuid.uuid4())

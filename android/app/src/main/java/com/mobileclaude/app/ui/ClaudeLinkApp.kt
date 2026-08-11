@@ -140,6 +140,7 @@ import com.mobileclaude.app.data.GpuSnapshot
 import com.mobileclaude.app.data.MainTab
 import com.mobileclaude.app.data.RemoteFileEntry
 import com.mobileclaude.app.data.ServerProfile
+import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.UpdateState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -203,6 +204,9 @@ fun ClaudeLinkApp(viewModel: AppViewModel) {
     }
     if (viewModel.folderPickerVisible && viewModel.folderListing != null) {
         FolderPicker(viewModel)
+    }
+    if (viewModel.newChatFolder != null) {
+        NewChatModeSheet(viewModel)
     }
     if (viewModel.ocrPreviewDraft != null) {
         OcrPreviewSheet(viewModel)
@@ -832,7 +836,7 @@ private fun ChatHistoryScreen(viewModel: AppViewModel) {
             title = "对话",
             subtitle = (viewModel.connectionStatus as? ConnectionStatus.Connected)?.health?.hostname,
             action = {
-                IconButton(onClick = { viewModel.createChat() }) {
+                IconButton(onClick = { viewModel.showFolderPicker() }) {
                     Icon(Icons.Default.Add, contentDescription = "新对话", tint = AppleBlue)
                 }
             },
@@ -871,7 +875,7 @@ private fun EmptyChatsCard(onChooseFolder: () -> Unit) {
         Column(Modifier.padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text("✦", color = AppleBlue, fontSize = 34.sp)
             Text("从一个项目开始", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-            Text("选择服务器目录，Claude 会在该目录中进行实验、绘图和整理结果。", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 10.dp))
+            Text("先选择服务器目录，再创建 Claude 对话或远程终端对话。", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 10.dp))
             FilledTonalButton(onClick = onChooseFolder, shape = RoundedCornerShape(14.dp)) {
                 Icon(Icons.Default.Home, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
@@ -884,6 +888,8 @@ private fun EmptyChatsCard(onChooseFolder: () -> Unit) {
 @Composable
 private fun ChatHistoryRow(chat: ChatSummary, onOpen: () -> Unit, onDelete: () -> Unit) {
     var confirm by remember { mutableStateOf(false) }
+    val terminal = chat.mode == "terminal"
+    val accent = if (terminal) Color(0xFF30A46C) else if (chat.pinned) WarmOrange else AppleBlue
     Surface(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
         shape = RoundedCornerShape(20.dp),
@@ -892,14 +898,18 @@ private fun ChatHistoryRow(chat: ChatSummary, onOpen: () -> Unit, onDelete: () -
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(44.dp).clip(RoundedCornerShape(14.dp)).background(
-                    if (chat.pinned) WarmOrange.copy(alpha = 0.14f) else AppleBlue.copy(alpha = 0.10f)
+                    accent.copy(alpha = 0.12f)
                 ),
                 contentAlignment = Alignment.Center,
-            ) { Text(if (chat.pinned) "★" else "✦", color = if (chat.pinned) WarmOrange else AppleBlue) }
+            ) { Text(if (terminal) ">_" else if (chat.pinned) "★" else "✦", color = accent, fontFamily = if (terminal) FontFamily.Monospace else null) }
             Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(chat.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    if (terminal) {
+                        Text("SSH 终端", color = accent, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.width(7.dp))
+                    }
                     if (chat.status == "running") {
                         CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                     }
@@ -925,6 +935,7 @@ private fun ChatHistoryRow(chat: ChatSummary, onOpen: () -> Unit, onDelete: () -
 
 @Composable
 private fun ChatScreen(viewModel: AppViewModel, detail: ChatDetail) {
+    val terminal = detail.chat.mode == "terminal"
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(WindowInsets.statusBars.asPaddingValues()).padding(horizontal = 8.dp, vertical = 6.dp),
@@ -934,7 +945,8 @@ private fun ChatScreen(viewModel: AppViewModel, detail: ChatDetail) {
             Column(Modifier.weight(1f)) {
                 Text(detail.chat.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    detail.chat.projectPath.substringAfterLast('/').ifBlank { detail.chat.projectPath },
+                    (if (terminal) "SSH 远程终端 · " else "") +
+                        detail.chat.projectPath.substringAfterLast('/').ifBlank { detail.chat.projectPath },
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -950,7 +962,11 @@ private fun ChatScreen(viewModel: AppViewModel, detail: ChatDetail) {
         }
         ProjectStrip(detail.chat.projectPath, detail.chat.pinned) { viewModel.showFolderPicker(detail.chat.projectPath) }
         MessageList(viewModel, detail, Modifier.weight(1f))
-        Composer(viewModel, chatId = detail.chat.id, running = detail.chat.status == "running")
+        if (terminal) {
+            TerminalComposer(viewModel, detail)
+        } else {
+            Composer(viewModel, chatId = detail.chat.id, running = detail.chat.status == "running")
+        }
     }
 }
 
@@ -974,7 +990,11 @@ private fun ProjectStrip(path: String, pinned: Boolean, onFolder: () -> Unit) {
 @Composable
 private fun MessageList(viewModel: AppViewModel, detail: ChatDetail, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
-    LaunchedEffect(detail.messages.size, detail.messages.lastOrNull()?.content) {
+    LaunchedEffect(
+        detail.messages.size,
+        detail.messages.lastOrNull()?.content,
+        viewModel.terminalLiveOutput,
+    ) {
         if (detail.messages.isNotEmpty()) listState.animateScrollToItem(detail.messages.lastIndex)
     }
     LazyColumn(
@@ -986,9 +1006,12 @@ private fun MessageList(viewModel: AppViewModel, detail: ChatDetail, modifier: M
         if (detail.messages.isEmpty()) {
             item {
                 Column(Modifier.fillParentMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Text("✦", color = AppleBlue, fontSize = 38.sp)
-                    Text("准备好开始实验", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    Text("描述目标，Claude 会在已挂载目录中工作。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (detail.chat.mode == "terminal") ">_" else "✦", color = if (detail.chat.mode == "terminal") Color(0xFF30A46C) else AppleBlue, fontSize = 38.sp, fontFamily = if (detail.chat.mode == "terminal") FontFamily.Monospace else null)
+                    Text(if (detail.chat.mode == "terminal") "远程终端已准备" else "准备好开始实验", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    Text(
+                        if (detail.chat.mode == "terminal") "命令将在服务器的 ${detail.chat.projectPath} 中执行。" else "描述目标，Claude 会在已挂载目录中工作。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -1036,6 +1059,30 @@ private fun MessageBubble(viewModel: AppViewModel, message: ChatMessage, detail:
             "artifact" -> {
                 val artifact = detail.artifacts.firstOrNull { it.id == message.metadata["id"] || it.name == message.content }
                 if (artifact != null) ArtifactCard(viewModel, artifact)
+            }
+            "terminal_input" -> Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = AppleBlue,
+                modifier = Modifier.fillMaxWidth(0.92f),
+            ) {
+                SelectionContainer {
+                    Text(
+                        "$ ${message.content}",
+                        color = Color.White,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                    )
+                }
+            }
+            "terminal_output" -> {
+                val content = if (viewModel.terminalLiveOutputMessageId == message.id) {
+                    viewModel.terminalLiveOutput
+                } else {
+                    message.content
+                }
+                TerminalOutputCard(content, message.status == "streaming")
             }
             "tool" -> ToolCard(message)
             "approval" -> ApprovalCard(
@@ -1089,6 +1136,47 @@ private fun MessageBubble(viewModel: AppViewModel, message: ChatMessage, detail:
                             Text("Claude 正在输入", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerminalOutputCard(content: String, streaming: Boolean) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFF11151A),
+        modifier = Modifier.fillMaxWidth(0.98f),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "REMOTE",
+                    color = Color(0xFF67D391),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                if (streaming) {
+                    Spacer(Modifier.width(8.dp))
+                    CircularProgressIndicator(
+                        Modifier.size(11.dp),
+                        strokeWidth = 1.5.dp,
+                        color = Color(0xFF67D391),
+                    )
+                }
+            }
+            if (content.isNotBlank()) {
+                Spacer(Modifier.height(7.dp))
+                SelectionContainer {
+                    Text(
+                        content,
+                        color = Color(0xFFE6EDF3),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                    )
                 }
             }
         }
@@ -1302,6 +1390,201 @@ private fun String.withoutVideoControlLines(): String = lineSequence()
     .trim()
 
 private const val MAX_VIDEOS_PER_MESSAGE = 2
+private const val MAX_TERMINAL_COMMAND_CHARS = 16_000
+
+@Composable
+private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
+    var text by remember(detail.chat.id) { mutableStateOf("") }
+    val history = detail.messages.filter { it.kind == "terminal_input" }.map { it.content }
+    var historyIndex by remember(detail.chat.id) { mutableStateOf(history.size) }
+    val status = viewModel.terminalStatus
+    val connected = status is TerminalStatus.Connected
+    val running = viewModel.terminalCommandRunning
+    val density = LocalDensity.current
+    val keyboardVisible = WindowInsets.ime.getBottom(density) > 0
+
+    LaunchedEffect(history.size) {
+        if (historyIndex > history.size) historyIndex = history.size
+    }
+
+    fun submit() {
+        if (!connected || viewModel.terminalCommandSending) return
+        val submitted = text
+        viewModel.sendTerminalCommand(submitted) {
+            if (text == submitted) text = ""
+            historyIndex = history.size + 1
+        }
+    }
+
+    Surface(color = MaterialTheme.colorScheme.background, shadowElevation = 7.dp) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .padding(horizontal = 12.dp)
+                .padding(top = 8.dp, bottom = if (keyboardVisible) 4.dp else 9.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val statusText = when (status) {
+                    TerminalStatus.Connecting -> "正在连接服务器终端…"
+                    TerminalStatus.Connected -> if (running) "远程程序正在运行 · 输入将作为标准输入且不保存" else "远程终端已连接 · ${detail.chat.projectPath}"
+                    TerminalStatus.Disconnected -> "远程终端未连接"
+                    is TerminalStatus.Error -> status.message
+                }
+                Text(
+                    statusText,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = when (status) {
+                        TerminalStatus.Connected -> Color(0xFF30A46C)
+                        is TerminalStatus.Error -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (!connected && status !is TerminalStatus.Connecting) {
+                    TextButton(onClick = viewModel::reconnectTerminal) { Text("重新连接") }
+                }
+            }
+            Spacer(Modifier.height(5.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilledTonalButton(
+                    onClick = { viewModel.sendTerminalControl(3) },
+                    enabled = connected,
+                    shape = RoundedCornerShape(11.dp),
+                    contentPadding = PaddingValues(horizontal = 11.dp, vertical = 5.dp),
+                ) { Text("Ctrl+C", fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                FilledTonalButton(
+                    onClick = { viewModel.sendTerminalControl(4) },
+                    enabled = connected,
+                    shape = RoundedCornerShape(11.dp),
+                    contentPadding = PaddingValues(horizontal = 11.dp, vertical = 5.dp),
+                ) { Text("Ctrl+D", fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = {
+                        if (history.isNotEmpty()) {
+                            historyIndex = (historyIndex - 1).coerceIn(0, history.lastIndex)
+                            text = history[historyIndex]
+                        }
+                    },
+                    enabled = !running && history.isNotEmpty(),
+                ) { Text("↑", fontSize = 18.sp) }
+                TextButton(
+                    onClick = {
+                        if (historyIndex < history.lastIndex) {
+                            historyIndex += 1
+                            text = history[historyIndex]
+                        } else {
+                            historyIndex = history.size
+                            text = ""
+                        }
+                    },
+                    enabled = !running && history.isNotEmpty(),
+                ) { Text("↓", fontSize = 18.sp) }
+            }
+            Spacer(Modifier.height(5.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = {
+                        text = it.replace("\r", "").replace("\n", "").take(MAX_TERMINAL_COMMAND_CHARS)
+                        historyIndex = history.size
+                    },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    enabled = connected && !viewModel.terminalCommandSending,
+                    label = { Text(if (running) "向远程程序输入（不保存）" else "服务器命令") },
+                    placeholder = { Text(if (running) "输入响应、密码或参数" else "例如 pwd、ls -la、python3") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { submit() }),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                    supportingText = if (text.length >= MAX_TERMINAL_COMMAND_CHARS - 500) {
+                        { Text("${text.length}/$MAX_TERMINAL_COMMAND_CHARS") }
+                    } else {
+                        null
+                    },
+                )
+                Spacer(Modifier.width(7.dp))
+                IconButton(
+                    onClick = ::submit,
+                    enabled = connected && !viewModel.terminalCommandSending && (text.isNotBlank() || running),
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (connected && !viewModel.terminalCommandSending && (text.isNotBlank() || running)) AppleBlue
+                            else MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                ) {
+                    if (viewModel.terminalCommandSending) {
+                        CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.Send, contentDescription = "发送到远程终端", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                }
+            }
+            Text(
+                "命令直接在远程服务器执行，不经过 Claude 操作审批；中文输入会在输入法完成选词后整段发送。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NewChatModeSheet(viewModel: AppViewModel) {
+    val path = viewModel.newChatFolder ?: return
+    ModalBottomSheet(
+        onDismissRequest = viewModel::dismissNewChatModePicker,
+        containerColor = MaterialTheme.colorScheme.background,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Text("创建对话", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(5.dp))
+            Text(
+                path,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(18.dp))
+            Button(
+                onClick = { viewModel.createChatForSelectedFolder("claude") },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(17.dp),
+            ) {
+                Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                    Text("✦  Claude 对话", fontWeight = FontWeight.Bold)
+                    Text("让 Claude 在这个服务器目录中工作", fontSize = 11.sp, color = Color.White.copy(alpha = 0.82f))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            FilledTonalButton(
+                onClick = { viewModel.createChatForSelectedFolder("terminal") },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(17.dp),
+            ) {
+                Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                    Text(">_  远程终端对话", fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text("通过 SSH 直接进入服务器上的这个目录", fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
 
 @Composable
 private fun Composer(viewModel: AppViewModel, chatId: String, running: Boolean) {

@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Base64
 import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.HostKey
 import com.jcraft.jsch.HostKeyRepository
@@ -43,12 +44,63 @@ data class TunnelConnection(
     val bridgeWarning: String? = null,
 )
 
+class SshTerminalSession internal constructor(
+    private val channel: ChannelShell,
+    private val reader: java.io.InputStreamReader,
+    private val writer: OutputStream,
+) {
+    val isConnected: Boolean
+        get() = channel.isConnected && !channel.isClosed
+
+    fun read(buffer: CharArray): Int = reader.read(buffer)
+
+    fun write(text: String) {
+        synchronized(writer) {
+            writer.write(text.toByteArray(Charsets.UTF_8))
+            writer.flush()
+        }
+    }
+
+    fun execute(command: String, completionMarker: String) {
+        require(completionMarker.matches(Regex("[A-Z0-9_:-]+"))) { "终端完成标记无效" }
+        val quoted = "'" + command.replace("'", "'\"'\"'") + "'"
+        write(
+            "__claude_link_command=$quoted; " +
+                "eval -- \"\$__claude_link_command\"; " +
+                "__claude_link_status=\$?; " +
+                "printf '\\n${completionMarker}%s\\n' \"\$__claude_link_status\"\r",
+        )
+    }
+
+    fun sendControl(code: Int) {
+        require(code in 0..31) { "终端控制码无效" }
+        synchronized(writer) {
+            writer.write(code)
+            writer.flush()
+        }
+    }
+
+    fun resize(columns: Int, rows: Int) {
+        channel.setPtySize(
+            columns.coerceIn(40, 240),
+            rows.coerceIn(12, 120),
+            0,
+            0,
+        )
+    }
+
+    fun close() {
+        runCatching { channel.disconnect() }
+    }
+}
+
 class SshTunnelManager(
     private val context: Context,
     private val profiles: ProfileRepository,
     private val vault: CredentialVault,
 ) {
     private var active: TunnelConnection? = null
+    private var activeTerminal: SshTerminalSession? = null
 
     suspend fun enroll(
         name: String,
@@ -139,9 +191,54 @@ class SshTunnelManager(
         connectInternal(profile, progress)
     }
 
+    @Synchronized
     fun disconnect() {
+        closeTerminal()
         active?.session?.disconnect()
         active = null
+    }
+
+    @Synchronized
+    fun openTerminal(initialDirectory: String, columns: Int = 100, rows: Int = 32): SshTerminalSession {
+        require(initialDirectory.startsWith('/')) { "终端目录必须是服务器绝对路径" }
+        val session = active?.session?.takeIf { it.isConnected }
+            ?: throw IOException("SSH 连接已断开，请先重新连接服务器")
+        closeTerminal()
+        val channel = session.openChannel("shell") as ChannelShell
+        channel.setPty(true)
+        channel.setPtyType(
+            "xterm-256color",
+            columns.coerceIn(40, 240),
+            rows.coerceIn(12, 120),
+            0,
+            0,
+        )
+        val input = channel.inputStream
+        val output = channel.outputStream
+        try {
+            channel.connect(CHANNEL_CONNECT_TIMEOUT_MILLIS)
+        } catch (error: Throwable) {
+            channel.disconnect()
+            throw IOException("无法打开 SSH 终端：${error.message ?: "服务器拒绝了 Shell 通道"}", error)
+        }
+        return SshTerminalSession(
+            channel = channel,
+            reader = input.reader(Charsets.UTF_8),
+            writer = output,
+        ).also {
+            activeTerminal = it
+            it.write(
+                "stty -echo; cd -- ${shellQuote(initialDirectory)} || { " +
+                    "printf 'Claude Link: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
+                    "printf '\\033[2J\\033[H'\r",
+            )
+        }
+    }
+
+    @Synchronized
+    fun closeTerminal() {
+        activeTerminal?.close()
+        activeTerminal = null
     }
 
     private fun connectInternal(

@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -164,6 +165,49 @@ class ServiceStateTests(unittest.TestCase):
             [before["id"], after["id"]],
         )
 
+    def test_terminal_chat_persists_mode_without_creating_a_claude_session(self):
+        terminal = self.state.store.create_chat(
+            str(self.project), title="新终端", mode="terminal"
+        )
+
+        self.assertEqual(terminal["mode"], "terminal")
+        self.assertEqual(self.state.store.claude_session_ids(terminal["id"]), [])
+        with self.assertRaises(KeyError):
+            self.state.store.active_claude_session(terminal["id"])
+
+    def test_terminal_command_and_output_are_idempotent_and_persisted(self):
+        terminal = self.state.store.create_chat(
+            str(self.project), title="新终端", mode="terminal"
+        )
+        command_id = "b39e4410-d489-4bc6-ae9e-1093c034332a"
+
+        first = self.state.store.add_terminal_command(terminal["id"], "pwd", command_id)
+        second = self.state.store.add_terminal_command(terminal["id"], "pwd", command_id)
+        self.assertEqual(first, second)
+
+        self.state.store.update_terminal_output(
+            terminal["id"], first[1], "/srv/project\n", "complete"
+        )
+        messages = self.state.store.list_messages(terminal["id"])
+        self.assertEqual(
+            [(item["kind"], item["content"], item["status"]) for item in messages],
+            [
+                ("terminal_input", "pwd", "complete"),
+                ("terminal_output", "/srv/project\n", "complete"),
+            ],
+        )
+        self.assertEqual(self.state.store.get_chat(terminal["id"])["title"], "pwd")
+
+    def test_terminal_project_change_does_not_create_a_claude_session(self):
+        other_project = self.root / "terminal-project"
+        other_project.mkdir()
+        terminal = self.state.store.create_chat(str(self.project), mode="terminal")
+
+        changed = self.state.store.change_project(terminal["id"], str(other_project))
+
+        self.assertEqual(changed["projectPath"], str(other_project))
+        self.assertEqual(self.state.store.claude_session_ids(terminal["id"]), [])
+
     def test_inactive_session_is_repaired_once_on_store_reopen(self):
         chat = self.state.store.create_chat(str(self.project))
         original_ids = self.state.store.claude_session_ids(chat["id"])
@@ -179,6 +223,32 @@ class ServiceStateTests(unittest.TestCase):
             self.assertEqual(len(reopened.claude_session_ids(chat["id"])), 2)
         finally:
             reopened.close()
+
+    def test_pre_terminal_database_migrates_existing_chats_to_claude_mode(self):
+        database = self.root / "legacy" / "history.sqlite3"
+        database.parent.mkdir()
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "CREATE TABLE chats ("
+            "id TEXT PRIMARY KEY,title TEXT NOT NULL,project_path TEXT NOT NULL,"
+            "created_at REAL NOT NULL,updated_at REAL NOT NULL,pinned INTEGER NOT NULL DEFAULT 0,"
+            "claude_started INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'idle',"
+            "last_error TEXT)"
+        )
+        chat_id = str(uuid.uuid4())
+        connection.execute(
+            "INSERT INTO chats(id,title,project_path,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (chat_id, "旧对话", str(self.project), time.time(), time.time()),
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = Store(database)
+        try:
+            self.assertEqual(migrated.get_chat(chat_id)["mode"], "claude")
+            self.assertEqual(migrated.active_claude_session(chat_id)["projectPath"], str(self.project))
+        finally:
+            migrated.close()
 
     def test_restart_recovers_running_stream_and_pending_approval(self):
         chat = self.state.store.create_chat(str(self.project))
@@ -648,6 +718,69 @@ class FileApiTests(unittest.TestCase):
             return response.status, json.loads(response.read())
         finally:
             connection.close()
+
+    def _patch(self, endpoint: str, payload: dict) -> tuple[int, dict]:
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=3)
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            connection.request(
+                "PATCH",
+                endpoint,
+                body=body,
+                headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+            )
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    def test_terminal_chat_http_flow_keeps_terminal_separate_from_claude(self):
+        project = self.home / "terminal-project"
+        project.mkdir()
+        chat_id = str(uuid.uuid4())
+        create_status, chat = self._post(
+            "/v1/chats",
+            {
+                "projectPath": str(project),
+                "clientChatId": chat_id,
+                "mode": "terminal",
+            },
+        )
+        self.assertEqual(create_status, 201)
+        self.assertEqual(chat["mode"], "terminal")
+
+        open_status, ready = self._post(
+            f"/v1/chats/{chat_id}/terminal/open", {}
+        )
+        self.assertEqual(open_status, 200)
+        self.assertTrue(ready["ready"])
+
+        command_status, receipt = self._post(
+            f"/v1/chats/{chat_id}/terminal/commands",
+            {"command": "pwd", "clientCommandId": str(uuid.uuid4())},
+        )
+        self.assertEqual(command_status, 202)
+        output_status, updated = self._patch(
+            f"/v1/chats/{chat_id}/terminal/outputs/{receipt['outputMessageId']}",
+            {"content": str(project) + "\n", "status": "complete"},
+        )
+        self.assertEqual(output_status, 200)
+        self.assertTrue(updated["updated"])
+
+        status, _, body = self._get(f"/v1/chats/{chat_id}")
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [(message["kind"], message["content"]) for message in payload["messages"]],
+            [("terminal_input", "pwd"), ("terminal_output", str(project) + "\n")],
+        )
+
+        claude_status, error = self._post(
+            f"/v1/chats/{chat_id}/messages",
+            {"text": "不能启动 Claude", "clientMessageId": str(uuid.uuid4())},
+        )
+        self.assertEqual(claude_status, 400)
+        self.assertIn("终端对话", error["error"])
 
     def test_message_post_is_idempotent_after_a_lost_response(self):
         project = self.home / "project"

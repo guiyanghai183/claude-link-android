@@ -21,6 +21,7 @@ data class ChatSummary(
     val id: String,
     val title: String,
     val projectPath: String,
+    val mode: String,
     val createdAt: String,
     val updatedAt: String,
     val pinned: Boolean,
@@ -64,6 +65,11 @@ data class ChatDetail(
     val chat: ChatSummary,
     val messages: List<ChatMessage>,
     val artifacts: List<Artifact>,
+)
+
+data class TerminalCommandReceipt(
+    val inputMessageId: Long,
+    val outputMessageId: Long,
 )
 
 data class RemoteDirectory(
@@ -136,6 +142,13 @@ data class GpuSnapshot(
 )
 
 enum class MainTab { CHATS, BROWSER, FILES, GPU, SERVERS }
+
+sealed interface TerminalStatus {
+    data object Disconnected : TerminalStatus
+    data object Connecting : TerminalStatus
+    data object Connected : TerminalStatus
+    data class Error(val message: String) : TerminalStatus
+}
 
 sealed interface ConnectionStatus {
     data object Disconnected : ConnectionStatus

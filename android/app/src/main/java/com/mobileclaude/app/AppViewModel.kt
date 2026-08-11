@@ -22,12 +22,15 @@ import com.mobileclaude.app.data.ProfileRepository
 import com.mobileclaude.app.data.RemoteFileEntry
 import com.mobileclaude.app.data.RemoteFileListing
 import com.mobileclaude.app.data.ServerProfile
+import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.WebAttachment
 import com.mobileclaude.app.data.UpdateState
 import com.mobileclaude.app.network.BridgeApi
 import com.mobileclaude.app.security.CredentialVault
 import com.mobileclaude.app.ssh.SshTunnelManager
+import com.mobileclaude.app.ssh.SshTerminalSession
 import com.mobileclaude.app.ssh.TunnelConnection
+import com.mobileclaude.app.terminal.TerminalTextBuffer
 import com.mobileclaude.app.update.GitHubUpdateManager
 import com.mobileclaude.app.update.InstallLaunchResult
 import kotlinx.coroutines.CancellationException
@@ -59,6 +62,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var pollJob: Job? = null
     private var chatLoadJob: Job? = null
     private var gpuPollJob: Job? = null
+    private var terminalReaderJob: Job? = null
+    private var terminalPersistJob: Job? = null
+    private var terminalSession: SshTerminalSession? = null
+    private var terminalGeneration = 0L
+    private var terminalChatId: String? = null
+    private var terminalCompletionMarker: String? = null
+    private val terminalBuffer = TerminalTextBuffer()
     private val reconnectMutex = Mutex()
     private var activeChatGeneration = 0L
     private var busyTaskCount = 0
@@ -85,6 +95,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var folderPickerVisible by mutableStateOf(false)
         private set
+    var newChatFolder by mutableStateOf<String?>(null)
+        private set
     var addServerVisible by mutableStateOf(profiles.isEmpty())
     var busy by mutableStateOf(false)
         private set
@@ -103,6 +115,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var gpuBusy by mutableStateOf(false)
         private set
     var gpuError by mutableStateOf<String?>(null)
+        private set
+    var terminalStatus by mutableStateOf<TerminalStatus>(TerminalStatus.Disconnected)
+        private set
+    var terminalCommandSending by mutableStateOf(false)
+        private set
+    var terminalCommandRunning by mutableStateOf(false)
+        private set
+    var terminalLiveOutput by mutableStateOf("")
+        private set
+    var terminalLiveOutputMessageId by mutableStateOf<Long?>(null)
         private set
     var remoteFileListing by mutableStateOf<RemoteFileListing?>(null)
         private set
@@ -265,6 +287,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pollJob?.cancel()
         pollJob = null
         stopGpuMonitoring()
+        stopTerminalSession(persistOutput = false)
         tunnel.disconnect()
         api = null
         activeProfile = null
@@ -279,6 +302,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         deepSeekBusy = false
         gpuSnapshot = null
         gpuError = null
+        newChatFolder = null
         clearRemoteFileState()
         connectionStatus = ConnectionStatus.Disconnected
     }
@@ -312,7 +336,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { runTask { refreshChatsInternal() } }
     }
 
-    fun createChat(projectPath: String? = null) {
+    fun createChat(projectPath: String? = null, mode: String = "claude") {
+        if (mode !in setOf("claude", "terminal")) return
         val clientChatId = UUID.randomUUID().toString()
         val generation = beginChatSelection()
         chatLoadJob?.cancel()
@@ -321,7 +346,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             runTask {
                 val home = (connectionStatus as? ConnectionStatus.Connected)?.health?.home
                     ?: error("服务器尚未连接")
-                val created = callBridge { it.createChat(projectPath ?: home, clientChatId) }
+                val created = callBridge {
+                    it.createChat(projectPath ?: home, clientChatId, mode)
+                }
                 refreshChatsInternal()
                 openChatInternal(created.id, generation)
             }
@@ -337,16 +364,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeChat() {
+        stopTerminalSession()
         activeChatGeneration += 1
         chatLoadJob?.cancel()
         chatLoadJob = null
         pollJob?.cancel()
         pollJob = null
         activeChat = null
+        if (activeProfile != null) refreshChats()
     }
 
     fun sendMessage(text: String, onAccepted: () -> Unit = {}) {
-        val chatId = activeChat?.chat?.id ?: return
+        val detail = activeChat ?: return
+        if (detail.chat.mode != "claude") return
+        val chatId = detail.chat.id
         val generation = activeChatGeneration
         val attachment = pendingWebAttachments[chatId]
         if (text.isBlank() && attachment == null) return
@@ -364,6 +395,265 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 startPolling(chatId, generation)
             } catch (error: Throwable) {
                 if (error !is CancellationException) errorMessage = error.userMessage()
+            }
+        }
+    }
+
+    fun reconnectTerminal() {
+        val chat = activeChat?.chat ?: return
+        if (chat.mode != "terminal") return
+        startTerminalSession(chat.id, chat.projectPath)
+    }
+
+    fun sendTerminalCommand(command: String, onAccepted: () -> Unit = {}) {
+        val detail = activeChat ?: return
+        if (detail.chat.mode != "terminal" || terminalCommandSending) return
+        val opened = terminalSession?.takeIf { it.isConnected } ?: run {
+            errorMessage = "远程终端尚未连接"
+            return
+        }
+        if (terminalCommandRunning) {
+            viewModelScope.launch {
+                try {
+                    withContext(Dispatchers.IO) { opened.write(command + "\r") }
+                    runCatching(onAccepted)
+                } catch (error: Throwable) {
+                    if (error !is CancellationException) {
+                        terminalStatus = TerminalStatus.Error(error.userMessage())
+                    }
+                }
+            }
+            return
+        }
+        if (command.isBlank()) {
+            viewModelScope.launch {
+                runCatching { withContext(Dispatchers.IO) { opened.write("\r") } }
+                runCatching(onAccepted)
+            }
+            return
+        }
+        if (command.length > MAX_TERMINAL_COMMAND_CHARS) {
+            errorMessage = "单条终端命令不能超过 $MAX_TERMINAL_COMMAND_CHARS 个字符"
+            return
+        }
+        val chatId = detail.chat.id
+        val generation = terminalGeneration
+        val clientCommandId = UUID.randomUUID().toString()
+        terminalCommandSending = true
+        viewModelScope.launch {
+            try {
+                val receipt = callBridge {
+                    it.startTerminalCommand(chatId, command, clientCommandId)
+                }
+                if (
+                    generation != terminalGeneration ||
+                    terminalChatId != chatId ||
+                    activeChat?.chat?.id != chatId
+                ) {
+                    return@launch
+                }
+                val currentSession = terminalSession?.takeIf { it.isConnected }
+                    ?: throw IOException("远程终端连接已经结束")
+                terminalPersistJob?.cancel()
+                terminalPersistJob = null
+                terminalBuffer.clear()
+                terminalLiveOutput = ""
+                terminalLiveOutputMessageId = receipt.outputMessageId
+                terminalCompletionMarker =
+                    "__CLAUDE_LINK_DONE_${clientCommandId.replace("-", "").uppercase()}__:"
+                terminalCommandRunning = true
+                refreshActiveChat(chatId, activeChatGeneration)
+                withContext(Dispatchers.IO) {
+                    currentSession.execute(command, terminalCompletionMarker!!)
+                }
+                runCatching(onAccepted)
+            } catch (error: Throwable) {
+                if (error !is CancellationException) {
+                    terminalCommandRunning = false
+                    terminalCompletionMarker = null
+                    terminalStatus = TerminalStatus.Error(error.userMessage())
+                    errorMessage = error.userMessage()
+                }
+            } finally {
+                if (generation == terminalGeneration) terminalCommandSending = false
+            }
+        }
+    }
+
+    fun sendTerminalControl(code: Int) {
+        val opened = terminalSession?.takeIf { it.isConnected } ?: return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { opened.sendControl(code) }
+            } catch (error: Throwable) {
+                if (error !is CancellationException) {
+                    terminalStatus = TerminalStatus.Error(error.userMessage())
+                }
+            }
+        }
+    }
+
+    private fun startTerminalSession(chatId: String, projectPath: String) {
+        stopTerminalSession()
+        val generation = terminalGeneration
+        terminalChatId = chatId
+        terminalStatus = TerminalStatus.Connecting
+        terminalCommandSending = false
+        viewModelScope.launch {
+            try {
+                callBridge { it.prepareTerminalChat(chatId) }
+                val opened = withContext(Dispatchers.IO) {
+                    tunnel.openTerminal(projectPath)
+                }
+                if (
+                    generation != terminalGeneration ||
+                    activeChat?.chat?.id != chatId ||
+                    activeChat?.chat?.mode != "terminal"
+                ) {
+                    opened.close()
+                    return@launch
+                }
+                terminalSession = opened
+                terminalStatus = TerminalStatus.Connected
+                terminalReaderJob = viewModelScope.launch(Dispatchers.IO) {
+                    val buffer = CharArray(4_096)
+                    var failure: Throwable? = null
+                    try {
+                        while (isActive) {
+                            val count = opened.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            val chunk = String(buffer, 0, count)
+                            withContext(Dispatchers.Main) {
+                                handleTerminalChunk(generation, chunk)
+                            }
+                        }
+                    } catch (error: Throwable) {
+                        if (error !is CancellationException) failure = error
+                    } finally {
+                        withContext(Dispatchers.Main) {
+                            if (generation == terminalGeneration) {
+                                terminalSession = null
+                                terminalCommandRunning = false
+                                terminalCompletionMarker = null
+                                terminalStatus = failure?.let {
+                                    TerminalStatus.Error(it.userMessage())
+                                } ?: TerminalStatus.Disconnected
+                                completeTerminalOutput(
+                                    generation,
+                                    disconnected = true,
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                if (generation == terminalGeneration && error !is CancellationException) {
+                    terminalStatus = TerminalStatus.Error(error.userMessage())
+                    terminalSession = null
+                }
+            }
+        }
+    }
+
+    private fun handleTerminalChunk(generation: Long, chunk: String) {
+        if (
+            generation != terminalGeneration ||
+            terminalLiveOutputMessageId == null ||
+            !terminalCommandRunning
+        ) {
+            return
+        }
+        val rendered = terminalBuffer.append(chunk)
+        val marker = terminalCompletionMarker
+        if (marker != null) {
+            val completion = Regex(Regex.escape(marker) + "(-?\\d+)").find(rendered)
+            if (completion != null) {
+                val exitCode = completion.groupValues[1].toIntOrNull() ?: -1
+                val output = rendered.substring(0, completion.range.first).trimEnd().ifBlank {
+                    "（命令执行完成，没有输出）"
+                }
+                terminalLiveOutput = if (exitCode == 0) {
+                    output
+                } else {
+                    "$output\n[退出状态 $exitCode]"
+                }
+                terminalCommandRunning = false
+                terminalCompletionMarker = null
+                completeTerminalOutput(generation, disconnected = false)
+                return
+            }
+        }
+        terminalLiveOutput = rendered
+        scheduleTerminalPersist(generation)
+    }
+
+    private fun scheduleTerminalPersist(generation: Long) {
+        if (terminalPersistJob?.isActive == true) return
+        terminalPersistJob = viewModelScope.launch {
+            delay(TERMINAL_PERSIST_INTERVAL_MILLIS)
+            if (generation != terminalGeneration) return@launch
+            val chatId = terminalChatId ?: return@launch
+            val messageId = terminalLiveOutputMessageId ?: return@launch
+            val content = terminalLiveOutput
+            runCatching {
+                callBridge { it.updateTerminalOutput(chatId, messageId, content, complete = false) }
+            }
+        }
+    }
+
+    private fun completeTerminalOutput(generation: Long, disconnected: Boolean) {
+        if (generation != terminalGeneration) return
+        terminalPersistJob?.cancel()
+        terminalPersistJob = null
+        val chatId = terminalChatId ?: return
+        val messageId = terminalLiveOutputMessageId ?: return
+        val content = terminalLiveOutput.ifBlank {
+            if (disconnected) "（远程终端连接已结束）" else "（命令执行完成，没有输出）"
+        }
+        viewModelScope.launch {
+            runCatching {
+                callBridge { it.updateTerminalOutput(chatId, messageId, content, complete = true) }
+                if (activeChat?.chat?.id == chatId) {
+                    refreshActiveChat(chatId, activeChatGeneration)
+                }
+            }
+            if (
+                generation == terminalGeneration &&
+                terminalLiveOutputMessageId == messageId
+            ) {
+                terminalLiveOutputMessageId = null
+                terminalLiveOutput = ""
+                terminalBuffer.clear()
+            }
+        }
+    }
+
+    private fun stopTerminalSession(persistOutput: Boolean = true) {
+        val chatId = terminalChatId
+        val messageId = terminalLiveOutputMessageId
+        val content = terminalLiveOutput.ifBlank { "（远程终端会话已结束）" }
+        terminalGeneration += 1
+        terminalReaderJob?.cancel()
+        terminalReaderJob = null
+        terminalPersistJob?.cancel()
+        terminalPersistJob = null
+        terminalSession?.close()
+        terminalSession = null
+        tunnel.closeTerminal()
+        terminalChatId = null
+        terminalCompletionMarker = null
+        terminalStatus = TerminalStatus.Disconnected
+        terminalCommandSending = false
+        terminalCommandRunning = false
+        terminalLiveOutputMessageId = null
+        terminalLiveOutput = ""
+        terminalBuffer.clear()
+        if (persistOutput && chatId != null && messageId != null && activeProfile != null) {
+            viewModelScope.launch {
+                runCatching {
+                    callBridge { it.updateTerminalOutput(chatId, messageId, content, complete = true) }
+                }
             }
         }
     }
@@ -407,6 +697,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteChat(chatId: String) {
         viewModelScope.launch {
             runTask {
+                if (terminalChatId == chatId) stopTerminalSession()
                 callBridge { it.deleteChat(chatId) }
                 pendingWebAttachments.remove(chatId)
                 if (ocrPreviewTargetChatId == chatId) cancelOcrPreview()
@@ -437,29 +728,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         folderPickerVisible = false
     }
 
+    fun dismissNewChatModePicker() {
+        newChatFolder = null
+    }
+
+    fun createChatForSelectedFolder(mode: String) {
+        val path = newChatFolder ?: return
+        if (mode !in setOf("claude", "terminal")) return
+        newChatFolder = null
+        createChat(path, mode)
+    }
+
     fun selectCurrentFolder() {
         val listing = folderListing ?: return
         val detail = activeChat
         folderPickerVisible = false
         if (detail == null) {
-            createChat(listing.path)
+            newChatFolder = listing.path
         } else {
+            if (detail.chat.mode == "terminal") stopTerminalSession()
             val generation = activeChatGeneration
             viewModelScope.launch {
                 runTask {
                     callBridge { it.updateChat(detail.chat.id, projectPath = listing.path) }
                     refreshActiveChat(detail.chat.id, generation)
                     refreshChatsInternal()
+                    if (detail.chat.mode == "terminal" && generation == activeChatGeneration) {
+                        startTerminalSession(detail.chat.id, listing.path)
+                    }
                 }
             }
         }
     }
 
     fun attachWebPage(title: String, url: String, content: String) {
-        val chatId = activeChat?.chat?.id ?: run {
+        val chat = activeChat?.chat ?: run {
             errorMessage = "请先打开一个对话，再附加网页 OCR"
             return
         }
+        if (chat.mode != "claude") {
+            errorMessage = "网页 OCR 只能附加到 Claude 对话"
+            return
+        }
+        val chatId = chat.id
         val cleaned = content.trim().take(MAX_WEB_ATTACHMENT_CHARS)
         if (cleaned.isBlank()) {
             errorMessage = "这个页面没有提取到可附加的正文"
@@ -470,10 +781,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun showOcrPreview(title: String, url: String, content: String) {
-        val chatId = activeChat?.chat?.id ?: run {
+        val chat = activeChat?.chat ?: run {
             errorMessage = "请先打开一个对话，再使用 OCR 附加"
             return
         }
+        if (chat.mode != "claude") {
+            errorMessage = "网页 OCR 只能附加到 Claude 对话"
+            return
+        }
+        val chatId = chat.id
         val cleaned = content.trim().take(MAX_WEB_ATTACHMENT_CHARS)
         if (cleaned.isBlank()) {
             errorMessage = "这个页面没有提取到可预览的正文"
@@ -713,6 +1029,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pollJob?.cancelAndJoin()
         pollJob = null
         stopGpuMonitoring()
+        stopTerminalSession(persistOutput = false)
         tunnel.disconnect()
         api = null
         activeProfile = null
@@ -727,6 +1044,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         deepSeekBusy = false
         gpuSnapshot = null
         gpuError = null
+        newChatFolder = null
         clearRemoteFileState()
     }
 
@@ -747,6 +1065,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun beginChatSelection(): Long {
+        stopTerminalSession()
         activeChatGeneration += 1
         pollJob?.cancel()
         pollJob = null
@@ -759,7 +1078,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (generation != activeChatGeneration) return
         activeChat = detail
         selectedTab = MainTab.CHATS
-        startPolling(chatId, generation)
+        if (detail.chat.mode == "terminal") {
+            startTerminalSession(detail.chat.id, detail.chat.projectPath)
+        } else {
+            startPolling(chatId, generation)
+        }
     }
 
     private fun startPolling(chatId: String, generation: Long) {
@@ -865,6 +1188,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         stopGpuMonitoring()
+        stopTerminalSession(persistOutput = false)
         tunnel.disconnect()
         super.onCleared()
     }
@@ -874,6 +1198,8 @@ private const val CHAT_POLL_INTERVAL_MILLIS = 1_200L
 private const val GPU_POLL_INTERVAL_MILLIS = 2_000L
 private const val MAX_TEXT_PREVIEW_BYTES = 300_000
 private const val MAX_IMAGE_PREVIEW_DIMENSION = 2_048
+private const val MAX_TERMINAL_COMMAND_CHARS = 16_000
+private const val TERMINAL_PERSIST_INTERVAL_MILLIS = 300L
 
 private fun RemoteFileEntry.isPreviewableImage(): Boolean = mimeType.startsWith("image/") &&
     name.substringAfterLast('.', "").lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")

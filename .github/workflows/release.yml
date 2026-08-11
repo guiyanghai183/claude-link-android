@@ -57,7 +57,7 @@ jobs:
       - name: Test server bridge
         run: python3 -m unittest discover -s server/tests -v
 
-      - name: Build signed release APK
+      - name: Test Android and build signed release APK
         working-directory: android
         env:
           ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/release.keystore
@@ -66,7 +66,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon --console=plain -PGITHUB_REPOSITORY="$GITHUB_REPOSITORY"
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon --console=plain -PGITHUB_REPOSITORY="$GITHUB_REPOSITORY"
 
       - name: Prepare release assets
         id: assets
@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "精简目录选择界面：快捷位置仅显示当前 SSH 用户主目录和 / 根目录；仍可逐级浏览、直接输入绝对路径并挂载当前目录。" \
+            --arg releaseNotes "新增对话页远程终端：选择服务器目录后可创建 Claude 对话或 SSH 终端对话；终端直接进入所选服务器目录，支持持续 PTY、实时输出、Ctrl+C/Ctrl+D、命令历史和中文输入法整段提交；交互程序输入不写入聊天记录。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

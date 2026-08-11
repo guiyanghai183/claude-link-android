@@ -32,11 +32,11 @@ jobs:
       - name: Test server bridge
         run: python3 -m unittest discover -s server/tests -v
 
-      - name: Build debug APK
+      - name: Test Android and build debug APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon --console=plain -PGITHUB_REPOSITORY="$GITHUB_REPOSITORY"
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain -PGITHUB_REPOSITORY="$GITHUB_REPOSITORY"
 
       - name: Upload test APK
         uses: actions/upload-artifact@v7
