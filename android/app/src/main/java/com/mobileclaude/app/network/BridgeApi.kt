@@ -120,6 +120,9 @@ class BridgeApi(private val localPort: Int) {
             directories = json.getJSONArray("directories").mapObjects {
                 RemoteDirectory(it.getString("name"), it.getString("path"))
             },
+            locations = json.optJSONArray("locations")?.mapObjects {
+                RemoteDirectory(it.getString("name"), it.getString("path"))
+            }.orEmpty(),
         )
     }
 
@@ -146,6 +149,9 @@ class BridgeApi(private val localPort: Int) {
                     modifiedAt = entry.optString("modifiedAt"),
                     mimeType = entry.optString("mimeType"),
                 )
+            }.orEmpty(),
+            locations = json.optJSONArray("locations")?.mapObjects { entry ->
+                RemoteDirectory(entry.getString("name"), entry.getString("path"))
             }.orEmpty(),
         )
     }

@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -1656,43 +1656,132 @@ class ServiceState:
         if not path.exists() or not path.is_dir():
             raise ValueError("目录不存在或不是文件夹")
         if not os.access(path, os.R_OK | os.X_OK):
-            raise ValueError("当前服务器用户无权访问该目录")
+            raise PermissionError("当前服务器用户无权访问该目录")
         return str(path)
+
+    @staticmethod
+    def _can_browse_directory(path: Path) -> bool:
+        """Use the service account's real filesystem permissions as the boundary."""
+        try:
+            return path.is_dir() and os.access(path, os.R_OK | os.X_OK)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _decode_mount_path(raw_path: str) -> str:
+        """Decode the octal escapes used by Linux /proc/*/mountinfo."""
+        replacements = {
+            r"\040": " ",
+            r"\011": "\t",
+            r"\012": "\n",
+            r"\134": "\\",
+        }
+        for encoded, decoded in replacements.items():
+            raw_path = raw_path.replace(encoded, decoded)
+        return raw_path
+
+    def _mounted_directories(self) -> list[Path]:
+        """Return useful Linux mount points without advertising virtual kernels trees."""
+        mountinfo = Path("/proc/self/mountinfo")
+        if os.name != "posix" or not mountinfo.is_file():
+            return []
+
+        ignored_roots = ("/proc", "/sys", "/dev", "/run")
+        mounted: list[Path] = []
+        try:
+            lines = mountinfo.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 5:
+                continue
+            decoded = self._decode_mount_path(fields[4])
+            if decoded != "/" and any(
+                decoded == prefix or decoded.startswith(prefix + "/")
+                for prefix in ignored_roots
+            ):
+                continue
+            mounted.append(Path(decoded))
+        return mounted
+
+    def filesystem_locations(self) -> list[dict[str, str]]:
+        """Expose discoverable roots while leaving authorization to the host OS."""
+        home = Path.home().expanduser().resolve()
+        root = Path(home.anchor or os.sep).resolve()
+        preferred = [
+            root / "sdc",
+            root / "mnt" / "sdc",
+            root / "mnt",
+            root / "media",
+            root / "data",
+            root / "workspace",
+            root / "workspaces",
+        ]
+        candidates: list[tuple[str | None, Path]] = [
+            ("主目录", home),
+            ("文件系统根目录", root),
+            *((None, path) for path in preferred),
+            *((None, path) for path in self._mounted_directories()),
+        ]
+
+        locations: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for label, candidate in candidates:
+            try:
+                path = candidate.expanduser().resolve()
+            except OSError:
+                continue
+            canonical = str(path)
+            if canonical in seen or not self._can_browse_directory(path):
+                continue
+            seen.add(canonical)
+            locations.append(
+                {
+                    "name": label or f"可访问位置·{path.name or canonical}",
+                    "path": canonical,
+                }
+            )
+            if len(locations) == 64:
+                break
+        return locations
 
     def list_directories(self, raw_path: str | None) -> dict[str, Any]:
         path = Path(raw_path or str(Path.home())).expanduser().resolve()
         if not path.is_dir():
             raise ValueError("目录不存在")
+        if not os.access(path, os.R_OK | os.X_OK):
+            raise PermissionError("当前服务器用户无权读取该目录")
         entries = []
-        for child in path.iterdir():
-            with contextlib.suppress(OSError):
-                if child.is_dir() and not child.name.startswith("."):
-                    entries.append({"name": child.name, "path": str(child.resolve())})
+        try:
+            children = path.iterdir()
+            for child in children:
+                with contextlib.suppress(OSError):
+                    resolved_child = child.resolve()
+                    if self._can_browse_directory(resolved_child):
+                        entries.append({"name": child.name, "path": str(resolved_child)})
+        except OSError as exc:
+            raise PermissionError("当前服务器用户无权读取该目录") from exc
         entries.sort(key=lambda item: item["name"].lower())
         parent = str(path.parent) if path != path.parent else None
-        return {"path": str(path), "parent": parent, "directories": entries[:500]}
+        return {
+            "path": str(path),
+            "parent": parent,
+            "directories": entries[:500],
+            "locations": self.filesystem_locations(),
+        }
 
     @staticmethod
-    def _is_within(path: Path, root: Path) -> bool:
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return False
-
-    def _resolve_home_path(self, raw_path: str | None) -> tuple[Path, Path]:
-        """Resolve a request path without ever allowing it to escape the user's home."""
+    def _resolve_filesystem_path(raw_path: str | None) -> Path:
+        """Resolve absolute paths or home-relative paths for the SSH service user."""
         home = Path.home().expanduser().resolve()
         candidate = Path(raw_path).expanduser() if raw_path else home
         if not candidate.is_absolute():
             candidate = home / candidate
-        resolved = candidate.resolve()
-        if not self._is_within(resolved, home):
-            raise PermissionError("只能访问当前用户主目录内的文件")
-        return resolved, home
+        return candidate.resolve()
 
     def list_files(self, raw_path: str | None) -> dict[str, Any]:
-        path, home = self._resolve_home_path(raw_path)
+        path = self._resolve_filesystem_path(raw_path)
         if not path.exists():
             raise FileNotFoundError("目录不存在")
         if not path.is_dir():
@@ -1704,18 +1793,18 @@ class ServiceState:
         try:
             children = path.iterdir()
             for child in children:
-                if child.name.startswith("."):
-                    continue
                 try:
                     resolved_child = child.resolve()
-                    if not self._is_within(resolved_child, home):
-                        # Do not expose a symlink that would become an escape route.
-                        continue
                     metadata = resolved_child.stat()
                 except OSError:
                     continue
                 is_directory = stat.S_ISDIR(metadata.st_mode)
                 if not is_directory and not stat.S_ISREG(metadata.st_mode):
+                    continue
+                if is_directory:
+                    if not os.access(resolved_child, os.R_OK | os.X_OK):
+                        continue
+                elif not os.access(resolved_child, os.R_OK):
                     continue
                 mime_type = (
                     "inode/directory"
@@ -1725,7 +1814,7 @@ class ServiceState:
                 entries.append(
                     {
                         "name": child.name,
-                        "path": str(child),
+                        "path": str(resolved_child),
                         "isDirectory": is_directory,
                         "size": 0 if is_directory else metadata.st_size,
                         "modifiedAt": utc_iso(metadata.st_mtime),
@@ -1742,13 +1831,18 @@ class ServiceState:
                 item["name"],
             )
         )
-        parent = None if path == home else str(path.parent)
-        return {"path": str(path), "parent": parent, "entries": entries}
+        parent = str(path.parent) if path != path.parent else None
+        return {
+            "path": str(path),
+            "parent": parent,
+            "entries": entries,
+            "locations": self.filesystem_locations(),
+        }
 
     def resolve_file_content(self, raw_path: str | None) -> Path:
         if not raw_path:
             raise ValueError("缺少文件路径")
-        path, _ = self._resolve_home_path(raw_path)
+        path = self._resolve_filesystem_path(raw_path)
         if not path.exists():
             raise FileNotFoundError("文件不存在")
         if not path.is_file():

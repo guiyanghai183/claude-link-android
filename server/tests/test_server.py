@@ -31,6 +31,23 @@ from mobile_claude_server import (  # noqa: E402
 )
 
 
+class EmbeddedServerTests(unittest.TestCase):
+    def test_android_embeds_the_same_server_bridge(self):
+        repository = Path(__file__).resolve().parents[2]
+        standalone = repository / "server" / "mobile_claude_server.py"
+        embedded = (
+            repository
+            / "android"
+            / "app"
+            / "src"
+            / "main"
+            / "res"
+            / "raw"
+            / "mobile_claude_server.py"
+        )
+        self.assertEqual(embedded.read_bytes(), standalone.read_bytes())
+
+
 class ServiceStateTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -84,11 +101,40 @@ class ServiceStateTests(unittest.TestCase):
             self.assertEqual(self.state.cleanup_expired(), 0)
         self.assertTrue(self.state.store.get_chat(chat["id"])["pinned"])
 
-    def test_directory_listing_hides_dot_directories(self):
+    def test_directory_listing_includes_all_accessible_directories(self):
         (self.project / "visible").mkdir()
         (self.project / ".hidden").mkdir()
         result = self.state.list_directories(str(self.project))
-        self.assertEqual([item["name"] for item in result["directories"]], ["visible"])
+        self.assertEqual(
+            [item["name"] for item in result["directories"]],
+            [".hidden", "visible"],
+        )
+        self.assertIn("locations", result)
+
+    def test_directory_listing_filters_directories_the_service_user_cannot_browse(self):
+        allowed = self.project / "allowed"
+        blocked = self.project / "blocked"
+        allowed.mkdir()
+        blocked.mkdir()
+        real_access = os.access
+
+        def access(path, mode):
+            if Path(path).resolve() == blocked.resolve():
+                return False
+            return real_access(path, mode)
+
+        with patch("mobile_claude_server.os.access", side_effect=access):
+            result = self.state.list_directories(str(self.project))
+
+        self.assertEqual([item["name"] for item in result["directories"]], ["allowed"])
+
+    def test_filesystem_locations_include_accessible_mounts(self):
+        mounted = self.root / "sdc"
+        mounted.mkdir()
+        with patch.object(self.state, "_mounted_directories", return_value=[mounted]):
+            locations = self.state.filesystem_locations()
+
+        self.assertIn(str(mounted.resolve()), [item["path"] for item in locations])
 
     def test_project_validation(self):
         self.assertEqual(self.state.validate_project(str(self.project)), str(self.project.resolve()))
@@ -626,7 +672,7 @@ class FileApiTests(unittest.TestCase):
             ["只发送一次"],
         )
 
-    def test_file_listing_defaults_to_home_hides_dot_entries_and_sorts_directories_first(self):
+    def test_file_listing_defaults_to_home_includes_dot_entries_and_sorts_directories_first(self):
         (self.home / "z-folder").mkdir()
         (self.home / "Alpha").mkdir()
         (self.home / ".secret").mkdir()
@@ -639,11 +685,12 @@ class FileApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         payload = json.loads(body)
         self.assertEqual(payload["path"], str(self.home.resolve()))
-        self.assertIsNone(payload["parent"])
+        self.assertEqual(payload["parent"], str(self.home.parent.resolve()))
         self.assertEqual(
             [entry["name"] for entry in payload["entries"]],
-            ["Alpha", "z-folder", "notes.txt", "photo.jpg"],
+            [".secret", "Alpha", "z-folder", ".hidden.txt", "notes.txt", "photo.jpg"],
         )
+        self.assertIn("locations", payload)
         by_name = {entry["name"]: entry for entry in payload["entries"]}
         self.assertTrue(by_name["Alpha"]["isDirectory"])
         self.assertEqual(by_name["Alpha"]["size"], 0)
@@ -653,19 +700,19 @@ class FileApiTests(unittest.TestCase):
         self.assertEqual(by_name["photo.jpg"]["mimeType"], "image/jpeg")
         self.assertTrue(by_name["photo.jpg"]["modifiedAt"].endswith("Z"))
 
-    def test_file_api_rejects_parent_traversal_and_paths_outside_home(self):
+    def test_file_api_allows_readable_paths_outside_home(self):
         secret = self.outside / "secret.txt"
         secret.write_text("do not expose", encoding="utf-8")
 
         status, _, body = self._get(self._url("/v1/files", "../outside"))
-        self.assertEqual(status, 403)
-        self.assertIn("主目录", json.loads(body)["error"])
+        self.assertEqual(status, 200)
+        self.assertEqual([entry["name"] for entry in json.loads(body)["entries"]], ["secret.txt"])
 
         status, _, body = self._get(self._url("/v1/files/content", secret))
-        self.assertEqual(status, 403)
-        self.assertIn("主目录", json.loads(body)["error"])
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"do not expose")
 
-    def test_file_api_hides_and_rejects_symlink_escape(self):
+    def test_file_api_follows_readable_symlinks_outside_home(self):
         secret = self.outside / "secret.txt"
         secret.write_text("do not expose", encoding="utf-8")
         escape = self.home / "escape"
@@ -676,11 +723,11 @@ class FileApiTests(unittest.TestCase):
 
         status, _, body = self._get("/v1/files")
         self.assertEqual(status, 200)
-        self.assertNotIn("escape", [entry["name"] for entry in json.loads(body)["entries"]])
+        self.assertIn("escape", [entry["name"] for entry in json.loads(body)["entries"]])
 
         status, _, body = self._get(self._url("/v1/files/content", escape / "secret.txt"))
-        self.assertEqual(status, 403)
-        self.assertIn("主目录", json.loads(body)["error"])
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"do not expose")
 
     def test_file_content_streams_full_and_ranged_video_bytes(self):
         video = self.home / "sample.mp4"

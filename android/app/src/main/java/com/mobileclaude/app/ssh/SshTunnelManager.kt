@@ -193,6 +193,7 @@ class SshTunnelManager(
         require(home.startsWith('/')) { "无法确定服务器用户目录" }
         val installDir = "$home/.local/share/mobile-claude"
         val remotePath = "$installDir/server.py"
+        val bridgeProcessPattern = "$installDir/[s]erver.py --host 127.0.0.1 --port $REMOTE_PORT"
         val bridgeBytes = context.resources.openRawResource(R.raw.mobile_claude_server).use { it.readBytes() }
         val localHash = sha256Hex(bridgeBytes)
         val remoteHash = exec(
@@ -222,11 +223,15 @@ class SshTunnelManager(
             exec(
                 session,
                 "if systemctl --user is-active --quiet mobile-claude.service; then " +
-                    "systemctl --user restart --no-block mobile-claude.service; fi",
+                    "systemctl --user restart --no-block mobile-claude.service; else " +
+                    "pkill -f ${shellQuote(bridgeProcessPattern)} >/dev/null 2>&1 || true; " +
+                    "for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do " +
+                    "pgrep -f ${shellQuote(bridgeProcessPattern)} >/dev/null || break; sleep 0.1; done; " +
+                    "pkill -KILL -f ${shellQuote(bridgeProcessPattern)} >/dev/null 2>&1 || true; fi",
             )
         }
         val launch =
-            "pgrep -f ${shellQuote("$remotePath --host 127.0.0.1 --port $REMOTE_PORT")} >/dev/null || " +
+            "pgrep -f ${shellQuote(bridgeProcessPattern)} >/dev/null || " +
                 "nohup python3 ${shellQuote(remotePath)} --host 127.0.0.1 --port $REMOTE_PORT " +
                 ">${shellQuote("$installDir/server.log")} 2>&1 </dev/null &"
         exec(session, launch, waitForExit = false)

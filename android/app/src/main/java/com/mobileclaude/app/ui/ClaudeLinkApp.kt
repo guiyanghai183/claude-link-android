@@ -1418,16 +1418,50 @@ private fun Composer(viewModel: AppViewModel, chatId: String, running: Boolean) 
 @Composable
 private fun FolderPicker(viewModel: AppViewModel) {
     val listing = viewModel.folderListing ?: return
+    var directPath by rememberSaveable(listing.path) { mutableStateOf(listing.path) }
     ModalBottomSheet(onDismissRequest = viewModel::dismissFolderPicker, containerColor = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.76f).padding(horizontal = 18.dp)) {
             Text("选择项目目录", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text(listing.path, maxLines = 2, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = directPath,
+                    onValueChange = { directPath = it },
+                    label = { Text("服务器绝对路径") },
+                    placeholder = { Text("例如 /sdc") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(
+                        onGo = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseFolder) },
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                FilledTonalButton(
+                    onClick = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseFolder) },
+                    enabled = directPath.isNotBlank(),
+                ) {
+                    Text("前往")
+                }
+            }
             Spacer(Modifier.height(12.dp))
             Button(onClick = viewModel::selectCurrentFolder, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
                 Text("挂载当前目录")
             }
             Spacer(Modifier.height(8.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                if (listing.locations.isNotEmpty()) {
+                    item {
+                        Text("可访问位置", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    items(listing.locations, key = { "location:${it.path}" }) { location ->
+                        FolderRow(location.name, location.path) { viewModel.browseFolder(location.path) }
+                    }
+                    item {
+                        Text("当前目录中的文件夹", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
                 listing.parent?.let { parent ->
                     item {
                         FolderRow("..", parent) { viewModel.browseFolder(parent) }
@@ -1459,6 +1493,7 @@ private fun FolderRow(name: String, path: String, onClick: () -> Unit) {
 @Composable
 private fun RemoteFilesScreen(viewModel: AppViewModel) {
     val listing = viewModel.remoteFileListing
+    var directPath by rememberSaveable(listing?.path) { mutableStateOf(listing?.path.orEmpty()) }
     LaunchedEffect(Unit) {
         if (listing == null) viewModel.browseRemoteFiles()
     }
@@ -1513,6 +1548,37 @@ private fun RemoteFilesScreen(viewModel: AppViewModel) {
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
                         verticalArrangement = Arrangement.spacedBy(9.dp),
                     ) {
+                        item {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(
+                                    value = directPath,
+                                    onValueChange = { directPath = it },
+                                    label = { Text("服务器绝对路径") },
+                                    placeholder = { Text("例如 /sdc") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                    keyboardActions = KeyboardActions(
+                                        onGo = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseRemoteFiles) },
+                                    ),
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                FilledTonalButton(
+                                    onClick = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseRemoteFiles) },
+                                    enabled = directPath.isNotBlank() && !viewModel.remoteFilesBusy,
+                                ) {
+                                    Text("前往")
+                                }
+                            }
+                        }
+                        if (listing.locations.isNotEmpty()) {
+                            item {
+                                Text("可访问位置", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            items(listing.locations, key = { "location:${it.path}" }) { location ->
+                                FolderRow(location.name, location.path) { viewModel.browseRemoteFiles(location.path) }
+                            }
+                        }
                         item {
                             Surface(
                                 shape = RoundedCornerShape(16.dp),

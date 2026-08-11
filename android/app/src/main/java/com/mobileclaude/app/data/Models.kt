@@ -75,6 +75,7 @@ data class DirectoryListing(
     val path: String,
     val parent: String?,
     val directories: List<RemoteDirectory>,
+    val locations: List<RemoteDirectory>,
 )
 
 data class RemoteFileEntry(
@@ -90,6 +91,7 @@ data class RemoteFileListing(
     val path: String,
     val parent: String?,
     val entries: List<RemoteFileEntry>,
+    val locations: List<RemoteDirectory>,
 )
 
 data class WebAttachment(
