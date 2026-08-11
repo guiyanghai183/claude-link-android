@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "图片和视频改为 Claude 明确选择后通过内置媒体工具交付，不再递归扫描并批量发送项目、依赖库、缓存或图标中的图片；Claude Code 启用原生 Auto Review 权限模式，常规安全操作自动审查并继续，高风险权限仍保留手机确认；关闭应用内 Claude 语音识别和麦克风权限，缩小 Claude 与远程终端输入框，并让每段对话的标题和目录默认折叠、按需展开。" \
+            --arg releaseNotes "移除远程终端输入框空闲状态下的“命令”占位文字，让输入栏更简洁；远程程序运行时仍显示“标准输入”，用于区分新命令与程序交互输入。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

@@ -1568,7 +1568,9 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                     modifier = Modifier.weight(1f).height(44.dp),
                     singleLine = true,
                     enabled = connected && !viewModel.terminalCommandSending,
-                    placeholder = { Text(if (running) "标准输入" else "命令", fontSize = 12.sp) },
+                    placeholder = {
+                        if (running) Text("标准输入", fontSize = 12.sp)
+                    },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { submit() }),
                     textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
