@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -1667,62 +1667,13 @@ class ServiceState:
         except OSError:
             return False
 
-    @staticmethod
-    def _decode_mount_path(raw_path: str) -> str:
-        """Decode the octal escapes used by Linux /proc/*/mountinfo."""
-        replacements = {
-            r"\040": " ",
-            r"\011": "\t",
-            r"\012": "\n",
-            r"\134": "\\",
-        }
-        for encoded, decoded in replacements.items():
-            raw_path = raw_path.replace(encoded, decoded)
-        return raw_path
-
-    def _mounted_directories(self) -> list[Path]:
-        """Return useful Linux mount points without advertising virtual kernels trees."""
-        mountinfo = Path("/proc/self/mountinfo")
-        if os.name != "posix" or not mountinfo.is_file():
-            return []
-
-        ignored_roots = ("/proc", "/sys", "/dev", "/run")
-        mounted: list[Path] = []
-        try:
-            lines = mountinfo.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return []
-        for line in lines:
-            fields = line.split()
-            if len(fields) < 5:
-                continue
-            decoded = self._decode_mount_path(fields[4])
-            if decoded != "/" and any(
-                decoded == prefix or decoded.startswith(prefix + "/")
-                for prefix in ignored_roots
-            ):
-                continue
-            mounted.append(Path(decoded))
-        return mounted
-
     def filesystem_locations(self) -> list[dict[str, str]]:
-        """Expose discoverable roots while leaving authorization to the host OS."""
+        """Expose only the user's home and filesystem root as navigation shortcuts."""
         home = Path.home().expanduser().resolve()
         root = Path(home.anchor or os.sep).resolve()
-        preferred = [
-            root / "sdc",
-            root / "mnt" / "sdc",
-            root / "mnt",
-            root / "media",
-            root / "data",
-            root / "workspace",
-            root / "workspaces",
-        ]
-        candidates: list[tuple[str | None, Path]] = [
-            ("主目录", home),
-            ("文件系统根目录", root),
-            *((None, path) for path in preferred),
-            *((None, path) for path in self._mounted_directories()),
+        candidates = [
+            (home.name or "主目录", home),
+            ("/ 根目录", root),
         ]
 
         locations: list[dict[str, str]] = []
@@ -1738,12 +1689,10 @@ class ServiceState:
             seen.add(canonical)
             locations.append(
                 {
-                    "name": label or f"可访问位置·{path.name or canonical}",
+                    "name": label,
                     "path": canonical,
                 }
             )
-            if len(locations) == 64:
-                break
         return locations
 
     def list_directories(self, raw_path: str | None) -> dict[str, Any]:

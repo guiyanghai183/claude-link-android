@@ -128,13 +128,20 @@ class ServiceStateTests(unittest.TestCase):
 
         self.assertEqual([item["name"] for item in result["directories"]], ["allowed"])
 
-    def test_filesystem_locations_include_accessible_mounts(self):
-        mounted = self.root / "sdc"
-        mounted.mkdir()
-        with patch.object(self.state, "_mounted_directories", return_value=[mounted]):
+    def test_filesystem_locations_only_include_home_and_root(self):
+        home = self.root / "gyhai"
+        home.mkdir()
+        with patch.object(Path, "home", return_value=home):
             locations = self.state.filesystem_locations()
 
-        self.assertIn(str(mounted.resolve()), [item["path"] for item in locations])
+        filesystem_root = Path(home.anchor or os.sep).resolve()
+        self.assertEqual(
+            locations,
+            [
+                {"name": "gyhai", "path": str(home.resolve())},
+                {"name": "/ 根目录", "path": str(filesystem_root)},
+            ],
+        )
 
     def test_project_validation(self):
         self.assertEqual(self.state.validate_project(str(self.project)), str(self.project.resolve()))

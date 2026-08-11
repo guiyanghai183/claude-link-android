@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "新增按 SSH 用户实际权限挂载和浏览全文件系统目录；支持直接输入 /sdc 等绝对路径；新增主目录、根目录和可访问挂载点快捷入口；修复非 systemd 服务器组件更新后旧进程未重启的问题。" \
+            --arg releaseNotes "精简目录选择界面：快捷位置仅显示当前 SSH 用户主目录和 / 根目录；仍可逐级浏览、直接输入绝对路径并挂载当前目录。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

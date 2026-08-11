@@ -1453,7 +1453,7 @@ private fun FolderPicker(viewModel: AppViewModel) {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 if (listing.locations.isNotEmpty()) {
                     item {
-                        Text("可访问位置", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("快捷位置", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     items(listing.locations, key = { "location:${it.path}" }) { location ->
                         FolderRow(location.name, location.path) { viewModel.browseFolder(location.path) }
@@ -1573,7 +1573,7 @@ private fun RemoteFilesScreen(viewModel: AppViewModel) {
                         }
                         if (listing.locations.isNotEmpty()) {
                             item {
-                                Text("可访问位置", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("快捷位置", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             items(listing.locations, key = { "location:${it.path}" }) { location ->
                                 FolderRow(location.name, location.path) { viewModel.browseRemoteFiles(location.path) }
