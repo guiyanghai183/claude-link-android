@@ -131,6 +131,26 @@ data class GpuInfo(
     val processes: List<GpuProcessInfo>,
 )
 
+data class GpuQueueJob(
+    val id: Int,
+    val status: String,
+    val gpuCount: Int,
+    val gpuIndices: String,
+    val pid: Int?,
+    val priority: Int,
+    val name: String,
+    val waited: String,
+    val running: String,
+)
+
+data class GpuQueueSnapshot(
+    val available: Boolean,
+    val timestamp: String,
+    val reason: String?,
+    val message: String?,
+    val jobs: List<GpuQueueJob>,
+)
+
 data class GpuSnapshot(
     val available: Boolean,
     val timestamp: String,
@@ -139,6 +159,7 @@ data class GpuSnapshot(
     val driverVersion: String,
     val processesAvailable: Boolean,
     val gpus: List<GpuInfo>,
+    val queue: GpuQueueSnapshot,
 )
 
 enum class MainTab { CHATS, BROWSER, FILES, GPU, SERVERS }

@@ -22,11 +22,13 @@ from mobile_claude_server import (  # noqa: E402
     GPU_COMMAND_TIMEOUT_SECONDS,
     GPU_PROCESS_QUERY_FIELDS,
     GPU_QUERY_FIELDS,
+    GPUQ_COMMAND_TIMEOUT_SECONDS,
     ServiceState,
     Store,
     extract_video_handoffs,
     fetch_deepseek_balance,
     fetch_gpu_snapshot,
+    fetch_gpuq_snapshot,
     present_image,
     present_video,
     prepare_user_prompt,
@@ -343,10 +345,16 @@ class ServiceStateTests(unittest.TestCase):
 
     def test_gpu_snapshot_cache_coalesces_refreshes(self):
         snapshot = {"available": True, "gpus": [{"index": 0}]}
-        with patch("mobile_claude_server.fetch_gpu_snapshot", return_value=snapshot) as fetch:
+        queue = {"available": True, "jobs": []}
+        with (
+            patch("mobile_claude_server.fetch_gpu_snapshot", return_value=snapshot) as fetch,
+            patch("mobile_claude_server.fetch_gpuq_snapshot", return_value=queue) as fetch_queue,
+        ):
             self.assertIs(self.state.gpu_snapshot(), snapshot)
             self.assertIs(self.state.gpu_snapshot(), snapshot)
         fetch.assert_called_once_with()
+        fetch_queue.assert_called_once_with()
+        self.assertIs(snapshot["queue"], queue)
 
     def test_web_ocr_reference_reaches_claude_before_user_request(self):
         prompt, attachments = prepare_user_prompt(
@@ -718,6 +726,84 @@ class GpuSnapshotTests(unittest.TestCase):
             ),
         ):
             result = fetch_gpu_snapshot()
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "timeout")
+
+
+class GpuqSnapshotTests(unittest.TestCase):
+    TABLE = (
+        "ID  状态     GPU数  GPU     PID  优先级  名称                           已等待    已运行\n"
+        "--  -------  -----  ---  ------  ------  -----------------------------  --------  --------\n"
+        "21  running      1  0    424242       0  train-model-s42                00:00:01  05:35:14\n"
+        "33  queued       2  -         -       4  queued  experiment             00:08:09  00:00:00\n"
+    )
+
+    def test_missing_gpuq_is_a_non_fatal_unavailable_state(self):
+        with patch("mobile_claude_server._find_gpuq", return_value=None):
+            result = fetch_gpuq_snapshot()
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "gpuq_not_found")
+        self.assertEqual(result["jobs"], [])
+
+    def test_active_queue_rows_are_normalized(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=self.TABLE, stderr="")
+        with (
+            patch("mobile_claude_server._find_gpuq", return_value="/home/tester/.local/bin/gpuq"),
+            patch("mobile_claude_server.subprocess.run", return_value=completed) as run,
+        ):
+            result = fetch_gpuq_snapshot()
+
+        self.assertTrue(result["available"])
+        self.assertEqual(
+            result["jobs"],
+            [
+                {
+                    "id": 21,
+                    "status": "running",
+                    "gpuCount": 1,
+                    "gpuIndices": "0",
+                    "pid": 424242,
+                    "priority": 0,
+                    "name": "train-model-s42",
+                    "waited": "00:00:01",
+                    "running": "05:35:14",
+                },
+                {
+                    "id": 33,
+                    "status": "queued",
+                    "gpuCount": 2,
+                    "gpuIndices": "",
+                    "pid": None,
+                    "priority": 4,
+                    "name": "queued  experiment",
+                    "waited": "00:08:09",
+                    "running": "00:00:00",
+                },
+            ],
+        )
+        self.assertEqual(run.call_args.args[0], ["/home/tester/.local/bin/gpuq", "list"])
+        self.assertEqual(run.call_args.kwargs["timeout"], GPUQ_COMMAND_TIMEOUT_SECONDS)
+        self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_empty_active_queue_is_available(self):
+        completed = subprocess.CompletedProcess([], 0, stdout="队列为空\n", stderr="")
+        with (
+            patch("mobile_claude_server._find_gpuq", return_value="/home/tester/.local/bin/gpuq"),
+            patch("mobile_claude_server.subprocess.run", return_value=completed),
+        ):
+            result = fetch_gpuq_snapshot()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["jobs"], [])
+
+    def test_gpuq_timeout_is_a_non_fatal_unavailable_state(self):
+        with (
+            patch("mobile_claude_server._find_gpuq", return_value="/home/tester/.local/bin/gpuq"),
+            patch(
+                "mobile_claude_server.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("gpuq", GPUQ_COMMAND_TIMEOUT_SECONDS),
+            ),
+        ):
+            result = fetch_gpuq_snapshot()
         self.assertFalse(result["available"])
         self.assertEqual(result["reason"], "timeout")
 

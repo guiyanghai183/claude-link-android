@@ -134,6 +134,8 @@ import com.mobileclaude.app.data.ChatSummary
 import com.mobileclaude.app.data.ConnectionStatus
 import com.mobileclaude.app.data.DeepSeekBalanceInfo
 import com.mobileclaude.app.data.GpuInfo
+import com.mobileclaude.app.data.GpuQueueJob
+import com.mobileclaude.app.data.GpuQueueSnapshot
 import com.mobileclaude.app.data.GpuSnapshot
 import com.mobileclaude.app.data.MainTab
 import com.mobileclaude.app.data.RemoteFileEntry
@@ -312,7 +314,7 @@ private fun BottomTabs(selected: MainTab, onSelect: (MainTab) -> Unit) {
             TabButton("◉", "对话", selected == MainTab.CHATS, Modifier.weight(1f)) { onSelect(MainTab.CHATS) }
             TabButton("◎", "浏览器", selected == MainTab.BROWSER, Modifier.weight(1f)) { onSelect(MainTab.BROWSER) }
             TabButton("▤", "文件", selected == MainTab.FILES, Modifier.weight(1f)) { onSelect(MainTab.FILES) }
-            TabButton("▥", "GPU", selected == MainTab.GPU, Modifier.weight(1f)) { onSelect(MainTab.GPU) }
+            TabButton("▥", "算力", selected == MainTab.GPU, Modifier.weight(1f)) { onSelect(MainTab.GPU) }
             TabButton("▣", "服务器", selected == MainTab.SERVERS, Modifier.weight(1f)) { onSelect(MainTab.SERVERS) }
         }
     }
@@ -2114,14 +2116,14 @@ private fun GpuScreen(viewModel: AppViewModel) {
     val snapshot = viewModel.gpuSnapshot
     Column(Modifier.fillMaxSize()) {
         ScreenHeader(
-            title = "NVIDIA GPU",
-            subtitle = "服务器本机遥测 · 每 2 秒更新",
+            title = "算力中心",
+            subtitle = "GPU 状态与 gpuq 队列 · 每 2 秒更新",
             action = {
                 IconButton(onClick = viewModel::refreshGpuStatus, enabled = !viewModel.gpuBusy) {
                     if (viewModel.gpuBusy && snapshot == null) {
                         CircularProgressIndicator(Modifier.size(21.dp), strokeWidth = 2.dp, color = NvidiaGreen)
                     } else {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新 GPU 状态", tint = NvidiaGreen)
+                        Icon(Icons.Default.Refresh, contentDescription = "刷新算力与队列状态", tint = NvidiaGreen)
                     }
                 }
             },
@@ -2132,19 +2134,27 @@ private fun GpuScreen(viewModel: AppViewModel) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = NvidiaGreen)
                         Spacer(Modifier.height(12.dp))
-                        Text("正在读取 nvidia-smi…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("正在读取算力与队列状态…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
-            snapshot == null -> GpuUnavailableCard(viewModel.gpuError ?: "暂时没有读取到 GPU 状态")
-            !snapshot.available -> GpuUnavailableCard(snapshot.message ?: "这台服务器没有可用的 NVIDIA GPU")
+            snapshot == null -> GpuUnavailableCard(viewModel.gpuError ?: "暂时没有读取到服务器算力状态")
             else -> {
                 LazyColumn(
                     Modifier.fillMaxSize(),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    item { GpuSummaryCard(snapshot) }
+                    item { GpuQueueCard(snapshot.queue) }
+                    if (snapshot.available) {
+                        item { GpuSummaryCard(snapshot) }
+                    } else {
+                        item {
+                            GpuTelemetryUnavailableCard(
+                                snapshot.message ?: "这台服务器没有可用的 NVIDIA GPU",
+                            )
+                        }
+                    }
                     viewModel.gpuError?.let { message ->
                         item {
                             Text(
@@ -2155,12 +2165,14 @@ private fun GpuScreen(viewModel: AppViewModel) {
                             )
                         }
                     }
-                    items(snapshot.gpus, key = { it.uuid.ifBlank { it.index.toString() } }) { gpu ->
-                        GpuDeviceCard(gpu, snapshot.processesAvailable)
+                    if (snapshot.available) {
+                        items(snapshot.gpus, key = { it.uuid.ifBlank { it.index.toString() } }) { gpu ->
+                            GpuDeviceCard(gpu, snapshot.processesAvailable)
+                        }
                     }
                     item {
                         Text(
-                            "本页只读取服务器本机 nvidia-smi，不调用 Claude 或 DeepSeek API；离开页面后自动停止刷新。",
+                            "本页只读调用服务器本机 nvidia-smi 与 gpuq list，不会提交、取消或修改队列任务，也不调用 Claude 或 DeepSeek API；离开页面后自动停止刷新。",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 11.sp,
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
@@ -2182,13 +2194,147 @@ private fun GpuUnavailableCard(message: String) {
         ) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Surface(shape = CircleShape, color = NvidiaGreen.copy(alpha = 0.14f)) {
-                    Text("GPU", color = NvidiaGreen, fontWeight = FontWeight.Bold, modifier = Modifier.padding(14.dp))
+                    Text("算力", color = NvidiaGreen, fontWeight = FontWeight.Bold, modifier = Modifier.padding(14.dp))
                 }
                 Spacer(Modifier.height(14.dp))
-                Text("GPU 遥测不可用", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text("算力状态不可用", fontWeight = FontWeight.Bold, fontSize = 18.sp)
                 Spacer(Modifier.height(6.dp))
                 Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+    }
+}
+
+@Composable
+private fun GpuTelemetryUnavailableCard(message: String) {
+    Surface(shape = RoundedCornerShape(23.dp), color = MaterialTheme.colorScheme.surface) {
+        Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = RoundedCornerShape(12.dp), color = NvidiaGreen.copy(alpha = 0.14f)) {
+                Text(
+                    "GPU",
+                    color = NvidiaGreen,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("NVIDIA 遥测不可用", fontWeight = FontWeight.Bold)
+                Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GpuQueueCard(queue: GpuQueueSnapshot) {
+    val running = queue.jobs.count { it.status == "running" }
+    val queued = queue.jobs.count { it.status == "queued" }
+    Surface(shape = RoundedCornerShape(23.dp), color = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.padding(18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(12.dp), color = NvidiaGreen.copy(alpha = 0.14f)) {
+                    Text(
+                        "gpuq",
+                        color = NvidiaGreen,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("任务队列", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    Text(
+                        "只显示 gpuq list 中正在运行和等待的任务",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp,
+                    )
+                }
+                Text(
+                    queue.jobs.size.toString(),
+                    color = NvidiaGreen,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 25.sp,
+                )
+            }
+            Spacer(Modifier.height(15.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                GpuMetricChip("运行中", running.toString(), NvidiaGreen, Modifier.weight(1f))
+                GpuMetricChip("排队中", queued.toString(), WarmOrange, Modifier.weight(1f))
+                GpuMetricChip("活动任务", queue.jobs.size.toString(), AppleBlue, Modifier.weight(1f))
+            }
+            HorizontalDivider(
+                Modifier.padding(vertical = 14.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+            )
+            when {
+                !queue.available -> Text(
+                    queue.message ?: "gpuq 队列当前不可用",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                )
+                queue.jobs.isEmpty() -> Text(
+                    "当前没有正在运行或排队中的 gpuq 任务",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                )
+                else -> queue.jobs.forEachIndexed { index, job ->
+                    if (index > 0) Spacer(Modifier.height(9.dp))
+                    GpuQueueJobCard(job)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GpuQueueJobCard(job: GpuQueueJob) {
+    val isRunning = job.status == "running"
+    val statusColor = if (isRunning) NvidiaGreen else WarmOrange
+    val statusLabel = when (job.status) {
+        "running" -> "运行中"
+        "queued" -> "排队中"
+        else -> job.status.ifBlank { "未知" }
+    }
+    val gpuPlacement = if (job.gpuIndices.isBlank()) "待分配" else job.gpuIndices
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = statusColor.copy(alpha = 0.075f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(statusColor))
+                Spacer(Modifier.width(7.dp))
+                Text(statusLabel, color = statusColor, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                Spacer(Modifier.weight(1f))
+                Text("#${job.id}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                job.name.ifBlank { "任务 ${job.id}" },
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(
+                buildList {
+                    add("GPU $gpuPlacement")
+                    add("申请 ${job.gpuCount} 张")
+                    job.pid?.let { add("PID $it") }
+                }.joinToString(" · "),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 10.sp,
+            )
+            Text(
+                "已等待 ${job.waited.ifBlank { "—" }} · 已运行 ${job.running.ifBlank { "—" }} · 优先级 ${job.priority}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 10.sp,
+            )
         }
     }
 }

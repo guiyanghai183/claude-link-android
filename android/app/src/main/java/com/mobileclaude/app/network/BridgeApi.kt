@@ -9,6 +9,8 @@ import com.mobileclaude.app.data.DeepSeekBalance
 import com.mobileclaude.app.data.DeepSeekBalanceInfo
 import com.mobileclaude.app.data.GpuInfo
 import com.mobileclaude.app.data.GpuProcessInfo
+import com.mobileclaude.app.data.GpuQueueJob
+import com.mobileclaude.app.data.GpuQueueSnapshot
 import com.mobileclaude.app.data.GpuSnapshot
 import com.mobileclaude.app.data.HealthInfo
 import com.mobileclaude.app.data.RemoteDirectory
@@ -277,6 +279,7 @@ class BridgeApi(private val localPort: Int) {
             connectTimeoutMillis = 2_000,
             readTimeoutMillis = 5_000,
         )
+        val queue = json.optJSONObject("queue")
         return GpuSnapshot(
             available = json.optBoolean("available"),
             timestamp = json.optString("timestamp"),
@@ -310,6 +313,35 @@ class BridgeApi(private val localPort: Int) {
                     }.orEmpty(),
                 )
             }.orEmpty(),
+            queue = if (queue == null) {
+                GpuQueueSnapshot(
+                    available = false,
+                    timestamp = json.optString("timestamp"),
+                    reason = "bridge_outdated",
+                    message = "服务器组件版本过旧，请重新连接以同步更新",
+                    jobs = emptyList(),
+                )
+            } else {
+                GpuQueueSnapshot(
+                    available = queue.optBoolean("available"),
+                    timestamp = queue.optString("timestamp"),
+                    reason = queue.optionalString("reason"),
+                    message = queue.optionalString("message"),
+                    jobs = queue.optJSONArray("jobs")?.mapObjects { job ->
+                        GpuQueueJob(
+                            id = job.optInt("id"),
+                            status = job.optString("status"),
+                            gpuCount = job.optInt("gpuCount"),
+                            gpuIndices = job.optString("gpuIndices"),
+                            pid = if (job.isNull("pid")) null else job.optInt("pid"),
+                            priority = job.optInt("priority"),
+                            name = job.optString("name"),
+                            waited = job.optString("waited"),
+                            running = job.optString("running"),
+                        )
+                    }.orEmpty(),
+                )
+            },
         )
     }
 

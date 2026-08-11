@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.10"
+APP_VERSION = "0.3.11"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -69,6 +69,7 @@ ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 GPU_CACHE_TTL_SECONDS = 0.8
 GPU_COMMAND_TIMEOUT_SECONDS = 3
+GPUQ_COMMAND_TIMEOUT_SECONDS = 3
 GPU_QUERY_FIELDS = (
     "index",
     "uuid",
@@ -87,6 +88,7 @@ GPU_QUERY_FIELDS = (
     "clocks.current.memory",
 )
 GPU_PROCESS_QUERY_FIELDS = ("gpu_uuid", "pid", "process_name", "used_memory")
+GPUQ_LIST_FIELDS = ("ID", "状态", "GPU数", "GPU", "PID", "优先级", "名称", "已等待", "已运行")
 
 
 class ChatBusyError(RuntimeError):
@@ -112,6 +114,16 @@ def _find_nvidia_smi() -> str | None:
         if Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return candidate
     discovered = shutil.which("nvidia-smi")
+    return str(Path(discovered).resolve()) if discovered else None
+
+
+def _find_gpuq() -> str | None:
+    """Locate the trusted scheduler client without accepting request-controlled input."""
+    candidates = (Path.home() / ".local" / "bin" / "gpuq", Path("/usr/local/bin/gpuq"))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+    discovered = shutil.which("gpuq")
     return str(Path(discovered).resolve()) if discovered else None
 
 
@@ -255,6 +267,90 @@ def fetch_gpu_snapshot() -> dict[str, Any]:
         "driverVersion": next((gpu["driverVersion"] for gpu in gpus if gpu["driverVersion"]), ""),
         "processesAvailable": processes_available,
         "gpus": gpus,
+    }
+
+
+def _gpuq_unavailable(reason: str, message: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "timestamp": utc_iso(),
+        "reason": reason,
+        "message": " ".join(clean_text(message).split())[:300],
+        "jobs": [],
+    }
+
+
+def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
+    """Parse gpuq's human-readable active queue table without invoking a shell."""
+    lines = [line.rstrip() for line in clean_text(output).splitlines() if line.strip()]
+    if not lines or (len(lines) == 1 and lines[0].strip() == "队列为空"):
+        return []
+    if len(lines) < 3:
+        raise ValueError("gpuq list 输出缺少表头")
+    headers = tuple(re.split(r"\s{2,}", lines[0].strip()))
+    if headers != GPUQ_LIST_FIELDS or not re.fullmatch(r"[-\s]+", lines[1].strip()):
+        raise ValueError("gpuq list 表头格式不受支持")
+
+    jobs: list[dict[str, Any]] = []
+    for line in lines[2:]:
+        parts = re.split(r"\s{2,}", line.strip())
+        if len(parts) < len(GPUQ_LIST_FIELDS):
+            raise ValueError("gpuq list 任务行字段不足")
+        if len(parts) > len(GPUQ_LIST_FIELDS):
+            parts = parts[:6] + ["  ".join(parts[6:-2])] + parts[-2:]
+        job_id = _optional_int(parts[0])
+        gpu_count = _optional_int(parts[2])
+        priority = _optional_int(parts[5])
+        if job_id is None or gpu_count is None or priority is None:
+            raise ValueError("gpuq list 任务行数字字段无效")
+        jobs.append(
+            {
+                "id": job_id,
+                "status": parts[1].strip().lower(),
+                "gpuCount": gpu_count,
+                "gpuIndices": "" if parts[3].strip() == "-" else parts[3].strip(),
+                "pid": _optional_int(parts[4]),
+                "priority": priority,
+                "name": clean_text(parts[6]).strip()[:200] or f"任务 {job_id}",
+                "waited": parts[7].strip(),
+                "running": parts[8].strip(),
+            }
+        )
+    return jobs
+
+
+def fetch_gpuq_snapshot() -> dict[str, Any]:
+    """Read the active gpuq queue. This is deliberately list-only and non-mutating."""
+    executable = _find_gpuq()
+    if not executable:
+        return _gpuq_unavailable("gpuq_not_found", "服务器未安装 gpuq")
+    try:
+        result = subprocess.run(
+            [executable, "list"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GPUQ_COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _gpuq_unavailable("timeout", "gpuq list 查询超时")
+    except OSError as exc:
+        return _gpuq_unavailable("command_failed", str(exc) or "无法运行 gpuq list")
+    if result.returncode != 0:
+        detail = result.stderr or result.stdout or "gpuq list 当前不可用"
+        return _gpuq_unavailable("command_failed", detail)
+    try:
+        jobs = _parse_gpuq_list(result.stdout)
+    except (TypeError, ValueError) as exc:
+        return _gpuq_unavailable("invalid_output", f"无法解析 gpuq list 输出：{exc}")
+    return {
+        "available": True,
+        "timestamp": utc_iso(),
+        "reason": None,
+        "message": None,
+        "jobs": jobs,
     }
 
 
@@ -1228,7 +1324,7 @@ class ClaudeManager:
                     "用户是否希望生成视频或提供直链。经用户同意启动长时间训练任务后，优先使用 systemd-run --user；若不可用，"
                     "再使用 nohup 或 tmux 在后台运行。只有启动命令实际成功后，才能回复任务单元或进程 PID、"
                     "日志路径、查看进度的方法和停止任务的方法，然后结束当前回合。不要为了监控而循环执行 sleep、"
-                    "tail、ps 或 nvidia-smi。Claude Link 的 GPU 页面会直接在服务器本地监控，这不需要额外的 "
+                    "tail、ps 或 nvidia-smi。Claude Link 的算力页面会直接在服务器本地监控，这不需要额外的 "
                     "Claude 工具调用或模型 API 循环；只有用户明确要求检查日志或结果时才再次查询。"
                 ),
             ]
@@ -1905,6 +2001,7 @@ class ServiceState:
             ):
                 return self._gpu_cached_snapshot
             snapshot = fetch_gpu_snapshot()
+            snapshot["queue"] = fetch_gpuq_snapshot()
             self._gpu_cached_snapshot = snapshot
             self._gpu_cached_at = time.monotonic()
             return snapshot

@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "移除远程终端输入框空闲状态下的“命令”占位文字，让输入栏更简洁；远程程序运行时仍显示“标准输入”，用于区分新命令与程序交互输入。" \
+            --arg releaseNotes "原 GPU 入口更名为“算力”，新的算力中心会同时显示 NVIDIA 实时状态与 gpuq list 中正在运行、排队的任务。gpuq 队列查询严格只读，不会提交、取消或修改任务。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
