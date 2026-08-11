@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "新增对话页远程终端：选择服务器目录后可创建 Claude 对话或 SSH 终端对话；终端直接进入所选服务器目录，支持持续 PTY、实时输出、Ctrl+C/Ctrl+D、命令历史和中文输入法整段提交；交互程序输入不写入聊天记录。" \
+            --arg releaseNotes "精简远程终端输入栏，移除重复路径和说明文字；Claude 语音输入改为应用内识别，Android 12 及以上优先使用系统本机识别器，其他设备请求离线模式，不再打开外部 Google 语音页面，并提供离线模型、网络和权限的明确提示。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

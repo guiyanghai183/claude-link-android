@@ -1,15 +1,14 @@
 package com.mobileclaude.app.ui
 
 import android.annotation.SuppressLint
-import android.app.Activity
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
-import android.speech.RecognizerIntent
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebChromeClient
@@ -120,6 +119,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -147,7 +147,6 @@ import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import java.math.BigDecimal
 import java.math.RoundingMode
-import java.util.Locale
 import kotlin.math.roundToInt
 
 @Composable
@@ -1426,9 +1425,9 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val statusText = when (status) {
-                    TerminalStatus.Connecting -> "正在连接服务器终端…"
-                    TerminalStatus.Connected -> if (running) "远程程序正在运行 · 输入将作为标准输入且不保存" else "远程终端已连接 · ${detail.chat.projectPath}"
-                    TerminalStatus.Disconnected -> "远程终端未连接"
+                    TerminalStatus.Connecting -> "连接中…"
+                    TerminalStatus.Connected -> if (running) "程序运行中" else "SSH 已连接"
+                    TerminalStatus.Disconnected -> "SSH 未连接"
                     is TerminalStatus.Error -> status.message
                 }
                 Text(
@@ -1441,32 +1440,25 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                         is TerminalStatus.Error -> MaterialTheme.colorScheme.error
                         else -> MaterialTheme.colorScheme.onSurfaceVariant
                     },
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 if (!connected && status !is TerminalStatus.Connecting) {
-                    TextButton(onClick = viewModel::reconnectTerminal) { Text("重新连接") }
+                    TextButton(
+                        onClick = viewModel::reconnectTerminal,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) { Text("重连", fontSize = 11.sp) }
                 }
-            }
-            Spacer(Modifier.height(5.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                FilledTonalButton(
+                TextButton(
                     onClick = { viewModel.sendTerminalControl(3) },
                     enabled = connected,
-                    shape = RoundedCornerShape(11.dp),
-                    contentPadding = PaddingValues(horizontal = 11.dp, vertical = 5.dp),
-                ) { Text("Ctrl+C", fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
-                FilledTonalButton(
+                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
+                ) { Text("^C", fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                TextButton(
                     onClick = { viewModel.sendTerminalControl(4) },
                     enabled = connected,
-                    shape = RoundedCornerShape(11.dp),
-                    contentPadding = PaddingValues(horizontal = 11.dp, vertical = 5.dp),
-                ) { Text("Ctrl+D", fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
-                Spacer(Modifier.weight(1f))
+                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp),
+                ) { Text("^D", fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
                 TextButton(
                     onClick = {
                         if (history.isNotEmpty()) {
@@ -1475,7 +1467,8 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                         }
                     },
                     enabled = !running && history.isNotEmpty(),
-                ) { Text("↑", fontSize = 18.sp) }
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                ) { Text("↑", fontSize = 16.sp) }
                 TextButton(
                     onClick = {
                         if (historyIndex < history.lastIndex) {
@@ -1487,9 +1480,10 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                         }
                     },
                     enabled = !running && history.isNotEmpty(),
-                ) { Text("↓", fontSize = 18.sp) }
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                ) { Text("↓", fontSize = 16.sp) }
             }
-            Spacer(Modifier.height(5.dp))
+            Spacer(Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = text,
@@ -1500,16 +1494,11 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                     modifier = Modifier.weight(1f),
                     singleLine = true,
                     enabled = connected && !viewModel.terminalCommandSending,
-                    label = { Text(if (running) "向远程程序输入（不保存）" else "服务器命令") },
-                    placeholder = { Text(if (running) "输入响应、密码或参数" else "例如 pwd、ls -la、python3") },
+                    placeholder = { Text(if (running) "标准输入" else "命令") },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { submit() }),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                    supportingText = if (text.length >= MAX_TERMINAL_COMMAND_CHARS - 500) {
-                        { Text("${text.length}/$MAX_TERMINAL_COMMAND_CHARS") }
-                    } else {
-                        null
-                    },
+                    shape = RoundedCornerShape(16.dp),
                 )
                 Spacer(Modifier.width(7.dp))
                 IconButton(
@@ -1530,12 +1519,6 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                     }
                 }
             }
-            Text(
-                "命令直接在远程服务器执行，不经过 Claude 操作审批；中文输入会在输入法完成选词后整段发送。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 10.sp,
-                modifier = Modifier.padding(top = 4.dp),
-            )
         }
     }
 }
@@ -1592,35 +1575,43 @@ private fun Composer(viewModel: AppViewModel, chatId: String, running: Boolean) 
     val context = LocalContext.current
     val density = LocalDensity.current
     val keyboardVisible = WindowInsets.ime.getBottom(density) > 0
-    val speechLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spoken = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-                ?.trim()
-                .orEmpty()
-            if (spoken.isNotBlank()) {
-                text = when {
-                    text.isBlank() -> spoken
-                    text.lastOrNull()?.isWhitespace() == true -> text + spoken
-                    else -> "$text $spoken"
-                }
-            }
+    var speechListening by remember(chatId) { mutableStateOf(false) }
+    val speechController = remember(context.applicationContext, chatId) {
+        VoiceInputController(context.applicationContext)
+    }
+    speechController.updateCallbacks(
+        onResult = { spoken -> text = appendRecognizedSpeech(text, spoken) },
+        onListeningChanged = { speechListening = it },
+        onErrorMessage = viewModel::showError,
+    )
+    DisposableEffect(speechController) {
+        onDispose { speechController.destroy() }
+    }
+    val microphonePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            speechController.start()
+        } else {
+            viewModel.showError("需要麦克风权限才能使用语音输入")
         }
     }
-    fun startSpeechRecognition() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "说出要发送给 Claude 的消息")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+    fun toggleSpeechRecognition() {
+        if (speechListening) {
+            speechController.stop()
+            return
         }
-        try {
-            speechLauncher.launch(intent)
-        } catch (_: ActivityNotFoundException) {
-            viewModel.showError("这台手机尚未安装可用的语音识别服务")
+        if (!speechController.available) {
+            viewModel.showError("这台手机没有可用的系统语音识别服务，可使用输入法自带的语音输入")
+            return
+        }
+        if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            speechController.start()
+        } else {
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
     Surface(color = MaterialTheme.colorScheme.background, shadowElevation = 6.dp) {
@@ -1667,16 +1658,23 @@ private fun Composer(viewModel: AppViewModel, chatId: String, running: Boolean) 
                 }
                 Spacer(Modifier.width(5.dp))
                 IconButton(
-                    onClick = ::startSpeechRecognition,
+                    onClick = ::toggleSpeechRecognition,
                     modifier = Modifier
                         .size(42.dp)
                         .clip(CircleShape)
-                        .background(AppleBlue.copy(alpha = 0.11f)),
+                        .background(
+                            if (speechListening) MaterialTheme.colorScheme.error
+                            else AppleBlue.copy(alpha = 0.11f)
+                        ),
                 ) {
                     Icon(
                         painterResource(R.drawable.ic_mic),
-                        contentDescription = "语音转文字",
-                        tint = AppleBlue,
+                        contentDescription = when {
+                            speechListening -> "停止语音识别"
+                            speechController.usesOnDeviceRecognizer -> "本机离线语音输入"
+                            else -> "语音转文字（优先离线）"
+                        },
+                        tint = if (speechListening) Color.White else AppleBlue,
                         modifier = Modifier.size(20.dp),
                     )
                 }
