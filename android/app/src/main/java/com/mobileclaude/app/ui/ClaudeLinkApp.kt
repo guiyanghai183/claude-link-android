@@ -1,12 +1,10 @@
 package com.mobileclaude.app.ui
 
 import android.annotation.SuppressLint
-import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.WebResourceError
@@ -14,8 +12,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -24,7 +20,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -102,10 +101,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -119,7 +118,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -935,32 +933,82 @@ private fun ChatHistoryRow(chat: ChatSummary, onOpen: () -> Unit, onDelete: () -
 @Composable
 private fun ChatScreen(viewModel: AppViewModel, detail: ChatDetail) {
     val terminal = detail.chat.mode == "terminal"
+    var headerExpanded by rememberSaveable(detail.chat.id) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(WindowInsets.statusBars.asPaddingValues()).padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = viewModel::closeChat) { Icon(Icons.Default.ArrowBack, contentDescription = "返回") }
-            Column(Modifier.weight(1f)) {
-                Text(detail.chat.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    (if (terminal) "SSH 远程终端 · " else "") +
-                        detail.chat.projectPath.substringAfterLast('/').ifBlank { detail.chat.projectPath },
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
+        if (headerExpanded) {
+            Column {
+                Row(
+                    Modifier.fillMaxWidth().padding(WindowInsets.statusBars.asPaddingValues()).padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = viewModel::closeChat) { Icon(Icons.Default.ArrowBack, contentDescription = "返回") }
+                    Column(Modifier.weight(1f)) {
+                        Text(detail.chat.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            (if (terminal) "SSH 远程终端 · " else "") +
+                                detail.chat.projectPath.substringAfterLast('/').ifBlank { detail.chat.projectPath },
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    IconButton(onClick = viewModel::togglePinned) {
+                        Icon(
+                            Icons.Default.Star,
+                            contentDescription = if (detail.chat.pinned) "取消永久保存" else "永久保存",
+                            tint = if (detail.chat.pinned) WarmOrange else MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                }
+                ProjectStrip(detail.chat.projectPath, detail.chat.pinned) {
+                    viewModel.showFolderPicker(detail.chat.projectPath)
+                }
             }
-            IconButton(onClick = viewModel::togglePinned) {
-                Icon(
-                    Icons.Default.Star,
-                    contentDescription = if (detail.chat.pinned) "取消永久保存" else "永久保存",
-                    tint = if (detail.chat.pinned) WarmOrange else MaterialTheme.colorScheme.outline,
-                )
+        } else {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(WindowInsets.statusBars.asPaddingValues())
+                    .height(38.dp)
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = viewModel::closeChat, modifier = Modifier.size(38.dp)) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .semantics { contentDescription = "显示对话标题和目录" }
+                        .clickable { headerExpanded = true },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .width(34.dp)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+                    )
+                }
+                IconButton(onClick = viewModel::togglePinned, modifier = Modifier.size(38.dp)) {
+                    Icon(
+                        Icons.Default.Star,
+                        contentDescription = if (detail.chat.pinned) "取消永久保存" else "永久保存",
+                        tint = if (detail.chat.pinned) WarmOrange else MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
         }
-        ProjectStrip(detail.chat.projectPath, detail.chat.pinned) { viewModel.showFolderPicker(detail.chat.projectPath) }
-        MessageList(viewModel, detail, Modifier.weight(1f))
+        MessageList(
+            viewModel,
+            detail,
+            Modifier.weight(1f),
+            onBackgroundTap = { headerExpanded = false },
+            dismissHeaderOnTap = headerExpanded,
+        )
         if (terminal) {
             TerminalComposer(viewModel, detail)
         } else {
@@ -987,7 +1035,13 @@ private fun ProjectStrip(path: String, pinned: Boolean, onFolder: () -> Unit) {
 }
 
 @Composable
-private fun MessageList(viewModel: AppViewModel, detail: ChatDetail, modifier: Modifier = Modifier) {
+private fun MessageList(
+    viewModel: AppViewModel,
+    detail: ChatDetail,
+    modifier: Modifier = Modifier,
+    onBackgroundTap: () -> Unit = {},
+    dismissHeaderOnTap: Boolean = false,
+) {
     val listState = rememberLazyListState()
     LaunchedEffect(
         detail.messages.size,
@@ -997,7 +1051,27 @@ private fun MessageList(viewModel: AppViewModel, detail: ChatDetail, modifier: M
         if (detail.messages.isNotEmpty()) listState.animateScrollToItem(detail.messages.lastIndex)
     }
     LazyColumn(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .then(
+                if (dismissHeaderOnTap) {
+                    Modifier.pointerInput(detail.chat.id) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(
+                                requireUnconsumed = false,
+                                pass = PointerEventPass.Final,
+                            )
+                            val handledByChild = down.isConsumed
+                            val up = waitForUpOrCancellation(pass = PointerEventPass.Final)
+                            if (!handledByChild && up != null && !up.isConsumed) {
+                                onBackgroundTap()
+                            }
+                        }
+                    }
+                } else {
+                    Modifier
+                }
+            ),
         state = listState,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1420,8 +1494,8 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
             Modifier
                 .fillMaxWidth()
                 .imePadding()
-                .padding(horizontal = 12.dp)
-                .padding(top = 8.dp, bottom = if (keyboardVisible) 4.dp else 9.dp)
+                .padding(horizontal = 10.dp)
+                .padding(top = 5.dp, bottom = if (keyboardVisible) 3.dp else 6.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val statusText = when (status) {
@@ -1491,21 +1565,21 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                         text = it.replace("\r", "").replace("\n", "").take(MAX_TERMINAL_COMMAND_CHARS)
                         historyIndex = history.size
                     },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).height(44.dp),
                     singleLine = true,
                     enabled = connected && !viewModel.terminalCommandSending,
-                    placeholder = { Text(if (running) "标准输入" else "命令") },
+                    placeholder = { Text(if (running) "标准输入" else "命令", fontSize = 12.sp) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { submit() }),
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                    shape = RoundedCornerShape(16.dp),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    shape = RoundedCornerShape(14.dp),
                 )
                 Spacer(Modifier.width(7.dp))
                 IconButton(
                     onClick = ::submit,
                     enabled = connected && !viewModel.terminalCommandSending && (text.isNotBlank() || running),
                     modifier = Modifier
-                        .size(46.dp)
+                        .size(40.dp)
                         .clip(CircleShape)
                         .background(
                             if (connected && !viewModel.terminalCommandSending && (text.isNotBlank() || running)) AppleBlue
@@ -1513,9 +1587,9 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                         ),
                 ) {
                     if (viewModel.terminalCommandSending) {
-                        CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Default.Send, contentDescription = "发送到远程终端", tint = Color.White, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Default.Send, contentDescription = "发送到远程终端", tint = Color.White, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -1572,55 +1646,15 @@ private fun NewChatModeSheet(viewModel: AppViewModel) {
 @Composable
 private fun Composer(viewModel: AppViewModel, chatId: String, running: Boolean) {
     var text by rememberSaveable(chatId) { mutableStateOf("") }
-    val context = LocalContext.current
     val density = LocalDensity.current
     val keyboardVisible = WindowInsets.ime.getBottom(density) > 0
-    var speechListening by remember(chatId) { mutableStateOf(false) }
-    val speechController = remember(context.applicationContext, chatId) {
-        VoiceInputController(context.applicationContext)
-    }
-    speechController.updateCallbacks(
-        onResult = { spoken -> text = appendRecognizedSpeech(text, spoken) },
-        onListeningChanged = { speechListening = it },
-        onErrorMessage = viewModel::showError,
-    )
-    DisposableEffect(speechController) {
-        onDispose { speechController.destroy() }
-    }
-    val microphonePermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            speechController.start()
-        } else {
-            viewModel.showError("需要麦克风权限才能使用语音输入")
-        }
-    }
-    fun toggleSpeechRecognition() {
-        if (speechListening) {
-            speechController.stop()
-            return
-        }
-        if (!speechController.available) {
-            viewModel.showError("这台手机没有可用的系统语音识别服务，可使用输入法自带的语音输入")
-            return
-        }
-        if (
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            speechController.start()
-        } else {
-            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
-        }
-    }
     Surface(color = MaterialTheme.colorScheme.background, shadowElevation = 6.dp) {
         Column(
             Modifier
                 .fillMaxWidth()
                 .imePadding()
-                .padding(horizontal = 12.dp)
-                .padding(top = 9.dp, bottom = if (keyboardVisible) 4.dp else 9.dp)
+                .padding(horizontal = 10.dp)
+                .padding(top = 6.dp, bottom = if (keyboardVisible) 3.dp else 6.dp)
         ) {
             val attachment = viewModel.pendingWebAttachment
             AnimatedVisibility(attachment != null, enter = fadeIn(), exit = fadeOut()) {
@@ -1640,55 +1674,33 @@ private fun Composer(viewModel: AppViewModel, chatId: String, running: Boolean) 
                     }
                 }
             }
-            Row(verticalAlignment = Alignment.Bottom) {
-                Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.weight(1f)) {
                     BasicTextField(
                         value = text,
                         onValueChange = { text = it },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 9.dp),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
                         minLines = 1,
-                        maxLines = 5,
+                        maxLines = 4,
                         decorationBox = { inner ->
-                            if (text.isBlank()) Text("给 Claude 发消息…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (text.isBlank()) Text("给 Claude 发消息…", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                             inner()
                         },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                     )
                 }
-                Spacer(Modifier.width(5.dp))
-                IconButton(
-                    onClick = ::toggleSpeechRecognition,
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (speechListening) MaterialTheme.colorScheme.error
-                            else AppleBlue.copy(alpha = 0.11f)
-                        ),
-                ) {
-                    Icon(
-                        painterResource(R.drawable.ic_mic),
-                        contentDescription = when {
-                            speechListening -> "停止语音识别"
-                            speechController.usesOnDeviceRecognizer -> "本机离线语音输入"
-                            else -> "语音转文字（优先离线）"
-                        },
-                        tint = if (speechListening) Color.White else AppleBlue,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-                Spacer(Modifier.width(5.dp))
+                Spacer(Modifier.width(6.dp))
                 if (running) {
-                    IconButton(onClick = viewModel::interrupt, modifier = Modifier.size(46.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error)) {
-                        Text("■", color = Color.White, fontSize = 15.sp)
+                    IconButton(onClick = viewModel::interrupt, modifier = Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error)) {
+                        Text("■", color = Color.White, fontSize = 13.sp)
                     }
                 } else {
                     IconButton(
                         onClick = { viewModel.sendMessage(text) { text = "" } },
                         enabled = text.isNotBlank() || viewModel.pendingWebAttachment != null,
-                        modifier = Modifier.size(46.dp).clip(CircleShape).background(if (text.isNotBlank() || viewModel.pendingWebAttachment != null) AppleBlue else MaterialTheme.colorScheme.surfaceVariant),
-                    ) { Icon(Icons.Default.Send, contentDescription = "发送", tint = Color.White, modifier = Modifier.size(20.dp)) }
+                        modifier = Modifier.size(40.dp).clip(CircleShape).background(if (text.isNotBlank() || viewModel.pendingWebAttachment != null) AppleBlue else MaterialTheme.colorScheme.surfaceVariant),
+                    ) { Icon(Icons.Default.Send, contentDescription = "发送", tint = Color.White, modifier = Modifier.size(18.dp)) }
                 }
             }
         }

@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "精简远程终端输入栏，移除重复路径和说明文字；Claude 语音输入改为应用内识别，Android 12 及以上优先使用系统本机识别器，其他设备请求离线模式，不再打开外部 Google 语音页面，并提供离线模型、网络和权限的明确提示。" \
+            --arg releaseNotes "图片和视频改为 Claude 明确选择后通过内置媒体工具交付，不再递归扫描并批量发送项目、依赖库、缓存或图标中的图片；Claude Code 启用原生 Auto Review 权限模式，常规安全操作自动审查并继续，高风险权限仍保留手机确认；关闭应用内 Claude 语音识别和麦克风权限，缩小 Claude 与远程终端输入框，并让每段对话的标题和目录默认折叠、按需展开。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

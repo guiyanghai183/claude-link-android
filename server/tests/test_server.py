@@ -27,6 +27,7 @@ from mobile_claude_server import (  # noqa: E402
     extract_video_handoffs,
     fetch_deepseek_balance,
     fetch_gpu_snapshot,
+    present_image,
     present_video,
     prepare_user_prompt,
 )
@@ -377,7 +378,9 @@ class ServiceStateTests(unittest.TestCase):
         prompt_index = command.index("--append-system-prompt") + 1
         system_prompt = command[prompt_index]
         self.assertIn("应用层媒体交付通道", system_prompt)
+        self.assertIn("mcp__claude_link__present_image", system_prompt)
         self.assertIn("mcp__claude_link__present_video", system_prompt)
+        self.assertIn("不要批量发送项目中的所有图片", system_prompt)
         self.assertIn("PNG、JPEG 或 WebP", system_prompt)
         self.assertIn("MP4（H.264 视频和 AAC 音频）", system_prompt)
         self.assertIn("claude-link-video: https://...", system_prompt)
@@ -389,15 +392,26 @@ class ServiceStateTests(unittest.TestCase):
         self.assertIn("不要为了监控而循环执行 sleep、tail、ps 或 nvidia-smi", system_prompt)
         self.assertIn("不需要额外的 Claude 工具调用或模型 API 循环", system_prompt)
         self.assertIn("--mcp-config", command)
+        self.assertEqual(command[command.index("--permission-mode") + 1], "auto")
         config = json.loads(command[command.index("--mcp-config") + 1])
         self.assertIn("claude_link", config["mcpServers"])
-        self.assertIn("mcp__claude_link__present_video", command)
+        allowed_tools = command[command.index("--allowedTools") + 1]
+        self.assertIn("mcp__claude_link__present_image", allowed_tools)
+        self.assertIn("mcp__claude_link__present_video", allowed_tools)
 
     def test_media_tool_publishes_structured_file_and_url_messages(self):
         chat = self.state.store.create_chat(str(self.project))
+        image = self.project / "chart.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"valid-image")
         video = self.project / "demo.mp4"
         video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00")
 
+        image_result = present_image(
+            self.state.store,
+            chat["id"],
+            str(self.project),
+            {"path": "chart.png", "title": "结果图"},
+        )
         file_result = present_video(
             self.state.store,
             chat["id"],
@@ -411,14 +425,20 @@ class ServiceStateTests(unittest.TestCase):
             {"url": "https://example.test/demo.m3u8", "title": "在线演示"},
         )
 
+        self.assertTrue(image_result["delivered"])
         self.assertTrue(file_result["delivered"])
         self.assertTrue(url_result["delivered"])
         messages = self.state.store.list_messages(chat["id"])
-        self.assertEqual([message["kind"] for message in messages], ["artifact", "video"])
-        self.assertEqual(messages[1]["metadata"]["url"], "https://example.test/demo.m3u8")
+        self.assertEqual(
+            [message["kind"] for message in messages],
+            ["artifact", "artifact", "video"],
+        )
+        self.assertEqual(messages[2]["metadata"]["url"], "https://example.test/demo.m3u8")
 
-    def test_mcp_stdio_lists_and_calls_the_video_tool(self):
+    def test_mcp_stdio_lists_and_calls_explicit_media_tools(self):
         chat = self.state.store.create_chat(str(self.project))
+        image = self.project / "selected.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"selected-image")
         requests = [
             {
                 "jsonrpc": "2.0",
@@ -435,6 +455,15 @@ class ServiceStateTests(unittest.TestCase):
             {
                 "jsonrpc": "2.0",
                 "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "present_image",
+                    "arguments": {"path": "selected.png"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
                 "method": "tools/call",
                 "params": {
                     "name": "present_video",
@@ -462,14 +491,48 @@ class ServiceStateTests(unittest.TestCase):
             check=True,
         )
         responses = [json.loads(line) for line in completed.stdout.splitlines() if line]
-        self.assertEqual([response["id"] for response in responses], [1, 2, 3])
-        tool = responses[1]["result"]["tools"][0]
-        self.assertEqual(tool["name"], "present_video")
-        self.assertIn("oneOf", tool["inputSchema"])
+        self.assertEqual([response["id"] for response in responses], [1, 2, 3, 4])
+        tools = {tool["name"]: tool for tool in responses[1]["result"]["tools"]}
+        self.assertEqual(set(tools), {"present_image", "present_video"})
+        self.assertIn("oneOf", tools["present_video"]["inputSchema"])
         self.assertFalse(responses[2]["result"]["isError"])
         self.assertNotIn("structuredContent", responses[2]["result"])
+        self.assertFalse(responses[3]["result"]["isError"])
         messages = self.state.store.list_messages(chat["id"])
-        self.assertEqual(messages[-1]["kind"], "video")
+        self.assertEqual([message["kind"] for message in messages[-2:]], ["artifact", "video"])
+
+    def test_present_image_rejects_an_obviously_fake_image(self):
+        chat = self.state.store.create_chat(str(self.project))
+        image = self.project / "fake.png"
+        image.write_bytes(b"not an image")
+        with self.assertRaises(ValueError):
+            present_image(
+                self.state.store,
+                chat["id"],
+                str(self.project),
+                {"path": "fake.png"},
+            )
+
+    def test_artifact_scan_does_not_implicitly_publish_images_or_videos(self):
+        chat = self.state.store.create_chat(str(self.project))
+        dependency = self.project / "site-packages"
+        dependency.mkdir()
+        (dependency / "library-icon.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"library-image"
+        )
+        (dependency / "package.json").write_text("{}", encoding="utf-8")
+        (self.project / "generated.mp4").write_bytes(
+            b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00"
+        )
+        (self.project / "report.pdf").write_bytes(b"%PDF-1.7\n")
+
+        self.state.claude._scan_artifacts(chat["id"], 0)
+
+        messages = self.state.store.list_messages(chat["id"])
+        self.assertEqual(
+            [(message["kind"], message["content"]) for message in messages],
+            [("artifact", "report.pdf")],
+        )
 
     def test_media_tool_rejects_an_obviously_fake_video_file(self):
         chat = self.state.store.create_chat(str(self.project))
@@ -485,8 +548,8 @@ class ServiceStateTests(unittest.TestCase):
 
     def test_artifact_scan_ignores_a_file_removed_during_registration(self):
         chat = self.state.store.create_chat(str(self.project))
-        video = self.project / "vanished.mp4"
-        video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00")
+        document = self.project / "vanished.pdf"
+        document.write_bytes(b"%PDF-1.7\n")
         with patch.object(
             self.state.store, "add_artifact", side_effect=FileNotFoundError("vanished")
         ):
