@@ -138,6 +138,7 @@ import com.mobileclaude.app.data.GpuQueueJob
 import com.mobileclaude.app.data.GpuQueueSnapshot
 import com.mobileclaude.app.data.GpuSnapshot
 import com.mobileclaude.app.data.MainTab
+import com.mobileclaude.app.data.RemoteDirectory
 import com.mobileclaude.app.data.RemoteFileEntry
 import com.mobileclaude.app.data.ServerProfile
 import com.mobileclaude.app.data.TerminalStatus
@@ -195,6 +196,7 @@ fun ClaudeLinkApp(viewModel: AppViewModel) {
                     }
                 }
             }
+            ReconnectingBanner(viewModel)
         }
     }
 
@@ -1601,6 +1603,44 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
     }
 }
 
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.ReconnectingBanner(viewModel: AppViewModel) {
+    val reconnecting = viewModel.connectionStatus as? ConnectionStatus.Connecting
+    AnimatedVisibility(
+        visible = viewModel.activeProfile != null && reconnecting != null,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = Modifier.align(Alignment.TopCenter),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 5.dp,
+            modifier = Modifier
+                .padding(WindowInsets.statusBars.asPaddingValues())
+                .padding(horizontal = 18.dp, vertical = 8.dp),
+        ) {
+            Row(
+                Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(
+                    Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = AppleBlue,
+                )
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    reconnecting?.message.orEmpty(),
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NewChatModeSheet(viewModel: AppViewModel) {
@@ -1721,27 +1761,23 @@ private fun FolderPicker(viewModel: AppViewModel) {
             Text("选择项目目录", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text(listing.path, maxLines = 2, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
             Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = directPath,
-                    onValueChange = { directPath = it },
-                    label = { Text("服务器绝对路径") },
-                    placeholder = { Text("例如 /sdc") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(
-                        onGo = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseFolder) },
-                    ),
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(Modifier.width(8.dp))
-                FilledTonalButton(
-                    onClick = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseFolder) },
-                    enabled = directPath.isNotBlank(),
-                ) {
-                    Text("前往")
-                }
-            }
+            ServerAbsolutePathInput(
+                value = directPath,
+                onValueChange = {
+                    directPath = it
+                    viewModel.suggestFolderPath(it)
+                },
+                suggestions = viewModel.folderPathSuggestions,
+                onGo = {
+                    viewModel.clearFolderPathSuggestions()
+                    directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseFolder)
+                },
+                onSuggestionSelected = { suggestion ->
+                    directPath = suggestion.path
+                    viewModel.clearFolderPathSuggestions()
+                    viewModel.browseFolder(suggestion.path)
+                },
+            )
             Spacer(Modifier.height(12.dp))
             Button(onClick = viewModel::selectCurrentFolder, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
                 Text("挂载当前目录")
@@ -1783,6 +1819,93 @@ private fun FolderRow(name: String, path: String, onClick: () -> Unit) {
                 Text(path, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 24.sp)
+        }
+    }
+}
+
+@Composable
+private fun ServerAbsolutePathInput(
+    value: String,
+    onValueChange: (String) -> Unit,
+    suggestions: List<RemoteDirectory>,
+    onGo: () -> Unit,
+    onSuggestionSelected: (RemoteDirectory) -> Unit,
+    enabled: Boolean = true,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Column(Modifier.weight(1f)) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = { Text("服务器绝对路径") },
+                placeholder = { Text("例如 /sdc") },
+                supportingText = {
+                    Text(
+                        if (suggestions.isEmpty()) "输入时自动联想有权限进入的服务器目录"
+                        else "点选联想结果可直接进入目录",
+                        fontSize = 10.sp,
+                    )
+                },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { if (enabled && value.isNotBlank()) onGo() }),
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            AnimatedVisibility(suggestions.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(15.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 3.dp,
+                    modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
+                ) {
+                    Column(Modifier.padding(vertical = 4.dp)) {
+                        suggestions.take(6).forEach { suggestion ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSuggestionSelected(suggestion) }
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    Icons.Default.Home,
+                                    contentDescription = null,
+                                    tint = AppleBlue,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                                Spacer(Modifier.width(9.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        suggestion.name,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        suggestion.path,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 9.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text("进入", color = AppleBlue, fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        FilledTonalButton(
+            onClick = onGo,
+            enabled = enabled && value.isNotBlank(),
+            modifier = Modifier.padding(top = 8.dp),
+        ) {
+            Text("前往")
         }
     }
 }
@@ -1846,27 +1969,25 @@ private fun RemoteFilesScreen(viewModel: AppViewModel) {
                         verticalArrangement = Arrangement.spacedBy(9.dp),
                     ) {
                         item {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                OutlinedTextField(
-                                    value = directPath,
-                                    onValueChange = { directPath = it },
-                                    label = { Text("服务器绝对路径") },
-                                    placeholder = { Text("例如 /sdc") },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                                    keyboardActions = KeyboardActions(
-                                        onGo = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseRemoteFiles) },
-                                    ),
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                FilledTonalButton(
-                                    onClick = { directPath.trim().takeIf { it.isNotEmpty() }?.let(viewModel::browseRemoteFiles) },
-                                    enabled = directPath.isNotBlank() && !viewModel.remoteFilesBusy,
-                                ) {
-                                    Text("前往")
-                                }
-                            }
+                            ServerAbsolutePathInput(
+                                value = directPath,
+                                onValueChange = {
+                                    directPath = it
+                                    viewModel.suggestRemotePath(it)
+                                },
+                                suggestions = viewModel.remotePathSuggestions,
+                                enabled = !viewModel.remoteFilesBusy,
+                                onGo = {
+                                    viewModel.clearRemotePathSuggestions()
+                                    directPath.trim().takeIf { it.isNotEmpty() }
+                                        ?.let(viewModel::browseRemoteFiles)
+                                },
+                                onSuggestionSelected = { suggestion ->
+                                    directPath = suggestion.path
+                                    viewModel.clearRemotePathSuggestions()
+                                    viewModel.browseRemoteFiles(suggestion.path)
+                                },
+                            )
                         }
                         if (listing.locations.isNotEmpty()) {
                             item {

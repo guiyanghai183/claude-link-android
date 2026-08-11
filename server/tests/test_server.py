@@ -132,6 +132,48 @@ class ServiceStateTests(unittest.TestCase):
 
         self.assertEqual([item["name"] for item in result["directories"]], ["allowed"])
 
+    def test_directory_suggestions_complete_only_accessible_absolute_paths(self):
+        visible = self.project / "visible"
+        video = self.project / "video-runs"
+        blocked = self.project / "virtual-private"
+        visible.mkdir()
+        video.mkdir()
+        blocked.mkdir()
+        real_access = os.access
+
+        def access(path, mode):
+            if Path(path).resolve() == blocked.resolve():
+                return False
+            return real_access(path, mode)
+
+        with patch("mobile_claude_server.os.access", side_effect=access):
+            result = self.state.suggest_directories(str(self.project / "vi"))
+
+        self.assertEqual(
+            result["suggestions"],
+            [
+                {"name": "video-runs", "path": str(video.resolve())},
+                {"name": "visible", "path": str(visible.resolve())},
+            ],
+        )
+        self.assertEqual(self.state.suggest_directories("relative/path"), {"suggestions": []})
+
+    def test_directory_suggestions_list_children_after_a_trailing_separator(self):
+        alpha = self.project / "alpha"
+        beta = self.project / "beta"
+        alpha.mkdir()
+        beta.mkdir()
+
+        result = self.state.suggest_directories(str(self.project) + os.sep)
+
+        self.assertEqual(
+            result["suggestions"],
+            [
+                {"name": "alpha", "path": str(alpha.resolve())},
+                {"name": "beta", "path": str(beta.resolve())},
+            ],
+        )
+
     def test_filesystem_locations_only_include_home_and_root(self):
         home = self.root / "gyhai"
         home.mkdir()
@@ -930,6 +972,21 @@ class FileApiTests(unittest.TestCase):
         )
         self.assertEqual(claude_status, 400)
         self.assertIn("终端对话", error["error"])
+
+    def test_directory_suggestions_http_endpoint(self):
+        project = self.home / "projects"
+        project.mkdir()
+        target = project / "sample-run"
+        target.mkdir()
+
+        endpoint = self._url("/v1/directories/suggestions", project / "sam")
+        status, _, body = self._get(endpoint)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["suggestions"],
+            [{"name": "sample-run", "path": str(target.resolve())}],
+        )
 
     def test_message_post_is_idempotent_after_a_lost_response(self):
         project = self.home / "project"

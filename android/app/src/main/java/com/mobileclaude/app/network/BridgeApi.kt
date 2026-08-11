@@ -169,6 +169,19 @@ class BridgeApi(private val localPort: Int) {
         )
     }
 
+    fun directorySuggestions(path: String): List<RemoteDirectory> {
+        if (path.isBlank()) return emptyList()
+        val json = request(
+            method = "GET",
+            path = "/v1/directories/suggestions?path=${encodeQueryParameter(path)}",
+            connectTimeoutMillis = 2_000,
+            readTimeoutMillis = 4_000,
+        )
+        return json.optJSONArray("suggestions")?.mapObjects {
+            RemoteDirectory(it.getString("name"), it.getString("path"))
+        }.orEmpty()
+    }
+
     fun fileListing(path: String? = null): RemoteFileListing {
         val suffix = path
             ?.takeIf { it.isNotBlank() }

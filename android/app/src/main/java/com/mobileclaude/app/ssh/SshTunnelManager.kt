@@ -343,7 +343,6 @@ class SshTunnelManager(
     }
 
     private fun configureTransport(session: Session, vpnNetwork: Network?) {
-        session.timeout = SOCKET_TIMEOUT_MILLIS
         session.serverAliveInterval = KEEPALIVE_INTERVAL_MILLIS
         session.serverAliveCountMax = KEEPALIVE_FAILURE_LIMIT
         vpnNetwork?.let { network ->
@@ -504,8 +503,8 @@ class SshTunnelManager(
         private const val SOCKET_TIMEOUT_MILLIS = 12_000
         private const val CHANNEL_CONNECT_TIMEOUT_MILLIS = 12_000
         private const val COMMAND_TIMEOUT_MILLIS = 20_000L
-        private const val KEEPALIVE_INTERVAL_MILLIS = 12_000
-        private const val KEEPALIVE_FAILURE_LIMIT = 5
+        private const val KEEPALIVE_INTERVAL_MILLIS = 10_000
+        private const val KEEPALIVE_FAILURE_LIMIT = 12
         private val RETRY_DELAYS_MILLIS = longArrayOf(800, 1_600)
     }
 }

@@ -3,6 +3,9 @@ package com.mobileclaude.app
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -19,6 +22,7 @@ import com.mobileclaude.app.data.DirectoryListing
 import com.mobileclaude.app.data.GpuSnapshot
 import com.mobileclaude.app.data.MainTab
 import com.mobileclaude.app.data.ProfileRepository
+import com.mobileclaude.app.data.RemoteDirectory
 import com.mobileclaude.app.data.RemoteFileEntry
 import com.mobileclaude.app.data.RemoteFileListing
 import com.mobileclaude.app.data.ServerProfile
@@ -30,6 +34,7 @@ import com.mobileclaude.app.security.CredentialVault
 import com.mobileclaude.app.ssh.SshTunnelManager
 import com.mobileclaude.app.ssh.SshTerminalSession
 import com.mobileclaude.app.ssh.TunnelConnection
+import com.mobileclaude.app.ssh.ReconnectDelayPolicy
 import com.mobileclaude.app.terminal.TerminalTextBuffer
 import com.mobileclaude.app.update.GitHubUpdateManager
 import com.mobileclaude.app.update.InstallLaunchResult
@@ -41,11 +46,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.EOFException
 import java.io.IOException
 import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -62,6 +69,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var pollJob: Job? = null
     private var chatLoadJob: Job? = null
     private var gpuPollJob: Job? = null
+    private var reconnectJob: Job? = null
+    private var connectionHealthJob: Job? = null
+    private var networkValidationJob: Job? = null
+    private var folderSuggestionJob: Job? = null
+    private var remoteSuggestionJob: Job? = null
     private var terminalReaderJob: Job? = null
     private var terminalPersistJob: Job? = null
     private var terminalSession: SshTerminalSession? = null
@@ -70,6 +82,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var terminalCompletionMarker: String? = null
     private val terminalBuffer = TerminalTextBuffer()
     private val reconnectMutex = Mutex()
+    private var connectionGeneration = 0L
     private var activeChatGeneration = 0L
     private var busyTaskCount = 0
     private val pendingWebAttachments = mutableStateMapOf<String, WebAttachment>()
@@ -94,6 +107,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var folderListing by mutableStateOf<DirectoryListing?>(null)
         private set
     var folderPickerVisible by mutableStateOf(false)
+        private set
+    var folderPathSuggestions by mutableStateOf<List<RemoteDirectory>>(emptyList())
         private set
     var newChatFolder by mutableStateOf<String?>(null)
         private set
@@ -130,6 +145,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var remoteFilesBusy by mutableStateOf(false)
         private set
+    var remotePathSuggestions by mutableStateOf<List<RemoteDirectory>>(emptyList())
+        private set
     var remoteFilePreview by mutableStateOf<RemoteFileEntry?>(null)
         private set
     var remoteFilePreviewBitmap by mutableStateOf<Bitmap?>(null)
@@ -141,8 +158,53 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var remoteFilePreviewError by mutableStateOf<String?>(null)
         private set
 
+    private val connectivityManager = application.getSystemService(ConnectivityManager::class.java)
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = scheduleNetworkValidation()
+
+        override fun onLost(network: Network) = scheduleNetworkValidation()
+
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
+            scheduleNetworkValidation()
+    }
+    private var networkCallbackRegistered = false
+
     init {
+        networkCallbackRegistered = runCatching {
+            connectivityManager?.registerDefaultNetworkCallback(networkCallback)
+            connectivityManager != null
+        }.getOrDefault(false)
         checkForUpdates(silent = true)
+        restoreLastConnectedProfile()
+    }
+
+    private fun restoreLastConnectedProfile() {
+        val profileId = profileRepository.lastConnectedProfileId() ?: return
+        val profile = profiles.firstOrNull { it.id == profileId } ?: run {
+            profileRepository.setLastConnectedProfileId(null)
+            return
+        }
+        activeProfile = profile
+        connectionStatus = ConnectionStatus.Connecting("正在自动恢复上次连接的服务器…")
+        scheduleTunnelRecovery("正在自动恢复上次连接的服务器…")
+    }
+
+    private fun scheduleNetworkValidation() {
+        viewModelScope.launch {
+            networkValidationJob?.cancel()
+            networkValidationJob = viewModelScope.launch {
+                delay(NETWORK_SETTLE_DELAY_MILLIS)
+                val profile = activeProfile ?: return@launch
+                val bridge = api
+                val healthy = bridge?.let { candidate ->
+                    runCatching { withContext(Dispatchers.IO) { candidate.health() } }.isSuccess
+                } ?: false
+                if (!healthy && activeProfile?.id == profile.id) {
+                    if (api === bridge) api = null
+                    scheduleTunnelRecovery("检测到 VPN 或网络变化，正在恢复连接…")
+                }
+            }
+        }
     }
 
     fun clearError() {
@@ -222,26 +284,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect(profile: ServerProfile) {
-        if (busy || connectionStatus is ConnectionStatus.Connecting) return
+        if (busy || (connectionStatus is ConnectionStatus.Connecting && reconnectJob?.isActive != true)) return
         connectionStatus = ConnectionStatus.Connecting("准备连接…")
         viewModelScope.launch {
             runTask {
-                val connection = reconnectMutex.withLock {
+                try {
                     prepareForManualConnection()
-                    val opened = tunnel.connect(profile) { message ->
-                        connectionStatus = ConnectionStatus.Connecting(message)
-                    }
-                    connectionStatus = ConnectionStatus.Connecting("等待服务器组件就绪…")
-                    val (bridge, health) = verifyConnection(opened)
-                    api = bridge
                     activeProfile = profile
-                    connectionStatus = ConnectionStatus.Connected(health)
-                    opened
+                    profileRepository.setLastConnectedProfileId(profile.id)
+                    val connection = reconnectMutex.withLock {
+                        val opened = tunnel.connect(profile) { message ->
+                            connectionStatus = ConnectionStatus.Connecting(message)
+                        }
+                        connectionStatus = ConnectionStatus.Connecting("等待服务器组件就绪…")
+                        val (bridge, health) = verifyConnection(opened)
+                        api = bridge
+                        connectionStatus = ConnectionStatus.Connected(health)
+                        opened
+                    }
+                    refreshDeepSeekConfiguration(profile)
+                    selectedTab = MainTab.CHATS
+                    refreshChatsInternal()
+                    startConnectionHealthMonitor()
+                    connection.bridgeWarning?.let { errorMessage = it }
+                } catch (error: Throwable) {
+                    if (error.isTunnelInterruption()) {
+                        activeProfile = profile
+                        profileRepository.setLastConnectedProfileId(profile.id)
+                        connectionStatus = ConnectionStatus.Connecting("连接暂时中断，正在自动重试…")
+                        scheduleTunnelRecovery("连接暂时中断，正在自动重试…")
+                        return@runTask
+                    }
+                    profileRepository.setLastConnectedProfileId(null)
+                    activeProfile = null
+                    throw error
                 }
-                refreshDeepSeekConfiguration(profile)
-                selectedTab = MainTab.CHATS
-                refreshChatsInternal()
-                connection.bridgeWarning?.let { errorMessage = it }
             }
         }
     }
@@ -257,8 +334,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         connectionStatus = ConnectionStatus.Connecting("准备首次连接…")
         viewModelScope.launch {
             runTask {
+                prepareForManualConnection()
                 val connection = reconnectMutex.withLock {
-                    prepareForManualConnection()
                     val opened = tunnel.enroll(name, host, port, username, password) { message ->
                         connectionStatus = ConnectionStatus.Connecting(message)
                     }
@@ -266,6 +343,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val (bridge, health) = verifyConnection(opened)
                     api = bridge
                     activeProfile = opened.profile
+                    profileRepository.setLastConnectedProfileId(opened.profile.id)
                     connectionStatus = ConnectionStatus.Connected(health)
                     opened
                 }
@@ -275,12 +353,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 addServerVisible = false
                 selectedTab = MainTab.CHATS
                 refreshChatsInternal()
+                startConnectionHealthMonitor()
                 connection.bridgeWarning?.let { errorMessage = it }
             }
         }
     }
 
     fun disconnect() {
+        connectionGeneration += 1
+        reconnectJob?.cancel()
+        reconnectJob = null
+        connectionHealthJob?.cancel()
+        connectionHealthJob = null
+        networkValidationJob?.cancel()
+        networkValidationJob = null
         activeChatGeneration += 1
         chatLoadJob?.cancel()
         chatLoadJob = null
@@ -289,6 +375,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         stopGpuMonitoring()
         stopTerminalSession(persistOutput = false)
         tunnel.disconnect()
+        profileRepository.setLastConnectedProfileId(null)
         api = null
         activeProfile = null
         activeChat = null
@@ -303,6 +390,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         gpuSnapshot = null
         gpuError = null
         newChatFolder = null
+        folderPathSuggestions = emptyList()
+        remotePathSuggestions = emptyList()
         clearRemoteFileState()
         connectionStatus = ConnectionStatus.Disconnected
     }
@@ -710,6 +799,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun showFolderPicker(initialPath: String? = null) {
         viewModelScope.launch {
             runTask {
+                folderPathSuggestions = emptyList()
                 folderListing = callBridge { it.listDirectories(initialPath) }
                 folderPickerVisible = true
             }
@@ -717,6 +807,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun browseFolder(path: String) {
+        folderSuggestionJob?.cancel()
+        folderPathSuggestions = emptyList()
         viewModelScope.launch {
             runTask {
                 folderListing = callBridge { it.listDirectories(path) }
@@ -725,7 +817,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun dismissFolderPicker() {
+        folderSuggestionJob?.cancel()
+        folderSuggestionJob = null
+        folderPathSuggestions = emptyList()
         folderPickerVisible = false
+    }
+
+    fun suggestFolderPath(path: String) {
+        folderSuggestionJob?.cancel()
+        folderPathSuggestions = emptyList()
+        val typed = path.trim()
+        if (!typed.startsWith('/')) return
+        folderSuggestionJob = viewModelScope.launch {
+            delay(PATH_SUGGESTION_DEBOUNCE_MILLIS)
+            val suggestions = runCatching {
+                callBridge { it.directorySuggestions(typed) }
+            }.getOrDefault(emptyList())
+            if (isActive) folderPathSuggestions = suggestions
+        }
+    }
+
+    fun clearFolderPathSuggestions() {
+        folderSuggestionJob?.cancel()
+        folderSuggestionJob = null
+        folderPathSuggestions = emptyList()
     }
 
     fun dismissNewChatModePicker() {
@@ -901,6 +1016,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun browseRemoteFiles(path: String? = null) {
         if (remoteFilesBusy) return
+        remoteSuggestionJob?.cancel()
+        remotePathSuggestions = emptyList()
         viewModelScope.launch {
             remoteFilesBusy = true
             try {
@@ -911,6 +1028,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 remoteFilesBusy = false
             }
         }
+    }
+
+    fun suggestRemotePath(path: String) {
+        remoteSuggestionJob?.cancel()
+        remotePathSuggestions = emptyList()
+        val typed = path.trim()
+        if (!typed.startsWith('/')) return
+        remoteSuggestionJob = viewModelScope.launch {
+            delay(PATH_SUGGESTION_DEBOUNCE_MILLIS)
+            val suggestions = runCatching {
+                callBridge { it.directorySuggestions(typed) }
+            }.getOrDefault(emptyList())
+            if (isActive) remotePathSuggestions = suggestions
+        }
+    }
+
+    fun clearRemotePathSuggestions() {
+        remoteSuggestionJob?.cancel()
+        remoteSuggestionJob = null
+        remotePathSuggestions = emptyList()
     }
 
     fun openRemoteFile(entry: RemoteFileEntry) {
@@ -1023,6 +1160,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun prepareForManualConnection() {
+        connectionGeneration += 1
+        reconnectJob?.cancelAndJoin()
+        reconnectJob = null
+        connectionHealthJob?.cancelAndJoin()
+        connectionHealthJob = null
+        networkValidationJob?.cancelAndJoin()
+        networkValidationJob = null
         activeChatGeneration += 1
         chatLoadJob?.cancelAndJoin()
         chatLoadJob = null
@@ -1045,10 +1189,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         gpuSnapshot = null
         gpuError = null
         newChatFolder = null
+        folderSuggestionJob?.cancel()
+        folderSuggestionJob = null
+        folderPathSuggestions = emptyList()
         clearRemoteFileState()
     }
 
     private fun clearRemoteFileState() {
+        remoteSuggestionJob?.cancel()
+        remoteSuggestionJob = null
+        remotePathSuggestions = emptyList()
         remoteFileListing = null
         remoteFilesBusy = false
         remoteFilePreview = null
@@ -1121,40 +1271,161 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun <T> callBridge(request: (BridgeApi) -> T): T {
-        val bridge = requireApi()
+        val bridge = awaitConnectedApi()
         return try {
             withContext(Dispatchers.IO) { request(bridge) }
         } catch (error: Throwable) {
             if (!error.isTunnelInterruption()) throw error
-            restoreTunnel()
-            withContext(Dispatchers.IO) { request(requireApi()) }
+            if (api === bridge) api = null
+            scheduleTunnelRecovery("连接暂时中断，正在自动恢复…")
+            val recovered = waitForRecoveredApi()
+                ?: throw IOException("连接正在后台自动恢复，请稍后重试", error)
+            try {
+                withContext(Dispatchers.IO) { request(recovered) }
+            } catch (retryError: Throwable) {
+                if (retryError.isTunnelInterruption()) {
+                    if (api === recovered) api = null
+                    scheduleTunnelRecovery("连接仍不稳定，正在继续自动恢复…")
+                }
+                throw retryError
+            }
         }
     }
 
-    private suspend fun restoreTunnel() {
-        reconnectMutex.withLock {
-            val profile = activeProfile ?: throw IOException("服务器连接已断开")
-            val restored = api?.let { candidate ->
-                runCatching { withContext(Dispatchers.IO) { candidate.health() } }.isSuccess
-            } ?: false
-            if (restored) return
-            connectionStatus = ConnectionStatus.Connecting("网络变化，正在恢复安全连接…")
-            api = null
+    private suspend fun awaitConnectedApi(): BridgeApi {
+        api?.let { return it }
+        if (activeProfile == null) throw IOException("请先连接服务器")
+        scheduleTunnelRecovery("连接已中断，正在自动恢复…")
+        return waitForRecoveredApi()
+            ?: throw IOException("连接正在后台自动恢复，请稍后重试")
+    }
+
+    private suspend fun waitForRecoveredApi(): BridgeApi? = withTimeoutOrNull(
+        REQUEST_RECOVERY_WAIT_MILLIS,
+    ) {
+        while (activeProfile != null) {
+            api?.let { return@withTimeoutOrNull it }
+            delay(RECOVERY_STATE_POLL_MILLIS)
+        }
+        null
+    }
+
+    private fun scheduleTunnelRecovery(message: String): Job? {
+        val profile = activeProfile ?: return null
+        reconnectJob?.takeIf { it.isActive }?.let { return it }
+        val generation = connectionGeneration
+        val job = viewModelScope.launch {
+            var failureCount = 0
             try {
-                val connection = tunnel.connect(profile) { message ->
-                    connectionStatus = ConnectionStatus.Connecting(message)
+                while (
+                    isActive &&
+                    generation == connectionGeneration &&
+                    activeProfile?.id == profile.id
+                ) {
+                    connectionStatus = ConnectionStatus.Connecting(
+                        if (failureCount == 0) message
+                        else "正在自动重连 ${profile.name}（第 ${failureCount + 1} 次）…",
+                    )
+                    val result = runCatching {
+                        reconnectMutex.withLock {
+                            if (
+                                generation != connectionGeneration ||
+                                activeProfile?.id != profile.id
+                            ) {
+                                throw CancellationException("连接目标已改变")
+                            }
+                            api?.let { candidate ->
+                                val health = withContext(Dispatchers.IO) { candidate.health() }
+                                return@withLock Triple(candidate, health, null as String?)
+                            }
+                            val connection = tunnel.connect(profile) { progress ->
+                                connectionStatus = ConnectionStatus.Connecting(progress)
+                            }
+                            connectionStatus = ConnectionStatus.Connecting("等待服务器组件就绪…")
+                            val (bridge, health) = verifyConnection(connection)
+                            Triple(bridge, health, connection.bridgeWarning)
+                        }
+                    }
+                    if (result.isSuccess) {
+                        val (bridge, health, warning) = result.getOrThrow()
+                        api = bridge
+                        profileRepository.setLastConnectedProfileId(profile.id)
+                        connectionStatus = ConnectionStatus.Connected(health)
+                        warning?.let { errorMessage = it }
+                        startConnectionHealthMonitor()
+                        refreshAfterReconnect(bridge)
+                        return@launch
+                    }
+
+                    val error = result.exceptionOrNull() ?: IOException("连接未完成")
+                    if (error is CancellationException) throw error
+                    api = null
+                    tunnel.disconnect()
+                    if (!error.isTunnelInterruption()) {
+                        profileRepository.setLastConnectedProfileId(null)
+                        connectionStatus = ConnectionStatus.Failed(error.userMessage())
+                        return@launch
+                    }
+                    failureCount += 1
+                    val retryDelay = ReconnectDelayPolicy.delayMillisAfterFailure(failureCount)
+                    connectionStatus = ConnectionStatus.Connecting(
+                        "VPN 或网络暂时不可用，${retryDelay / 1_000} 秒后自动重试…",
+                    )
+                    delay(retryDelay)
                 }
-                connectionStatus = ConnectionStatus.Connecting("等待服务器组件就绪…")
-                val (bridge, health) = verifyConnection(connection)
-                api = bridge
-                connectionStatus = ConnectionStatus.Connected(health)
-                connection.bridgeWarning?.let { errorMessage = it }
-            } catch (error: Throwable) {
-                tunnel.disconnect()
-                api = null
-                connectionStatus = ConnectionStatus.Failed(error.userMessage())
-                throw error
+            } finally {
+                if (generation == connectionGeneration && reconnectJob === coroutineContext[Job]) {
+                    reconnectJob = null
+                }
             }
+        }
+        reconnectJob = job
+        return job
+    }
+
+    private fun startConnectionHealthMonitor() {
+        connectionHealthJob?.cancel()
+        val generation = connectionGeneration
+        connectionHealthJob = viewModelScope.launch {
+            while (isActive && generation == connectionGeneration && activeProfile != null) {
+                delay(CONNECTION_HEALTH_INTERVAL_MILLIS)
+                val bridge = api
+                if (bridge == null) {
+                    scheduleTunnelRecovery("安全连接已断开，正在自动恢复…")
+                    continue
+                }
+                try {
+                    val health = withContext(Dispatchers.IO) { bridge.health() }
+                    if (api === bridge) connectionStatus = ConnectionStatus.Connected(health)
+                } catch (error: Throwable) {
+                    if (error is CancellationException) throw error
+                    if (error.isTunnelInterruption() && api === bridge) {
+                        api = null
+                        scheduleTunnelRecovery("健康检查发现连接中断，正在自动恢复…")
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun refreshAfterReconnect(bridge: BridgeApi) {
+        runCatching {
+            val updated = withContext(Dispatchers.IO) { bridge.listChats() }
+            chats.clear()
+            chats.addAll(updated)
+        }
+        val detail = activeChat ?: return
+        val refreshed = runCatching {
+            withContext(Dispatchers.IO) { bridge.getChat(detail.chat.id) }
+        }.getOrNull()
+        if (refreshed != null && activeChat?.chat?.id == detail.chat.id) {
+            activeChat = refreshed
+        }
+        val current = activeChat ?: return
+        if (current.chat.mode == "terminal") {
+            startTerminalSession(current.chat.id, current.chat.projectPath)
+        } else if (current.chat.status == "running") {
+            startPolling(current.chat.id, activeChatGeneration)
         }
     }
 
@@ -1184,9 +1455,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun requireApi(): BridgeApi = api ?: error("请先连接服务器")
-
     override fun onCleared() {
+        connectionGeneration += 1
+        reconnectJob?.cancel()
+        connectionHealthJob?.cancel()
+        networkValidationJob?.cancel()
+        folderSuggestionJob?.cancel()
+        remoteSuggestionJob?.cancel()
+        if (networkCallbackRegistered) {
+            runCatching { connectivityManager?.unregisterNetworkCallback(networkCallback) }
+            networkCallbackRegistered = false
+        }
         stopGpuMonitoring()
         stopTerminalSession(persistOutput = false)
         tunnel.disconnect()
@@ -1196,6 +1475,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
 private const val CHAT_POLL_INTERVAL_MILLIS = 1_200L
 private const val GPU_POLL_INTERVAL_MILLIS = 2_000L
+private const val CONNECTION_HEALTH_INTERVAL_MILLIS = 8_000L
+private const val NETWORK_SETTLE_DELAY_MILLIS = 900L
+private const val REQUEST_RECOVERY_WAIT_MILLIS = 20_000L
+private const val RECOVERY_STATE_POLL_MILLIS = 200L
+private const val PATH_SUGGESTION_DEBOUNCE_MILLIS = 250L
 private const val MAX_TEXT_PREVIEW_BYTES = 300_000
 private const val MAX_IMAGE_PREVIEW_DIMENSION = 2_048
 private const val MAX_TERMINAL_COMMAND_CHARS = 16_000
@@ -1229,12 +1513,31 @@ private fun decodePreviewBitmap(bytes: ByteArray): Bitmap? {
     )
 }
 
-private fun Throwable.isTunnelInterruption(): Boolean = generateSequence(this) { it.cause }.any { cause ->
-    cause is ConnectException ||
-        cause is SocketTimeoutException ||
-        cause is SocketException ||
-        cause is EOFException ||
-        cause is UnknownHostException
+private fun Throwable.isTunnelInterruption(): Boolean {
+    val causes = generateSequence(this) { it.cause }.toList()
+    if (causes.any { cause ->
+            cause is ConnectException ||
+                cause is SocketTimeoutException ||
+                cause is SocketException ||
+                cause is NoRouteToHostException ||
+                cause is EOFException ||
+                cause is UnknownHostException
+        }
+    ) {
+        return true
+    }
+    val details = causes.joinToString(" | ") { it.message.orEmpty() }.lowercase()
+    return listOf(
+        "timeout",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "socket is not established",
+        "network is unreachable",
+        "no route to host",
+        "connection closed",
+        "unexpected end of stream",
+    ).any(details::contains)
 }
 
 private fun Throwable.userMessage(): String = message?.takeIf { it.isNotBlank() }

@@ -8,7 +8,7 @@ class ProfileRepository(context: Context) {
     private val preferences = context.getSharedPreferences("server_profiles", Context.MODE_PRIVATE)
 
     fun load(): List<ServerProfile> {
-        val raw = preferences.getString("profiles", "[]") ?: "[]"
+        val raw = preferences.getString(PROFILES_KEY, "[]") ?: "[]"
         val array = runCatching { JSONArray(raw) }.getOrDefault(JSONArray())
         return buildList {
             for (index in 0 until array.length()) {
@@ -43,7 +43,18 @@ class ProfileRepository(context: Context) {
                     .put("fingerprint", it.fingerprint)
             )
         }
-        preferences.edit().putString("profiles", array.toString()).apply()
+        preferences.edit().putString(PROFILES_KEY, array.toString()).apply()
+    }
+
+    fun lastConnectedProfileId(): String? = preferences
+        .getString(LAST_CONNECTED_PROFILE_KEY, null)
+        ?.takeIf { it.isNotBlank() }
+
+    fun setLastConnectedProfileId(profileId: String?) {
+        preferences.edit().apply {
+            if (profileId.isNullOrBlank()) remove(LAST_CONNECTED_PROFILE_KEY)
+            else putString(LAST_CONNECTED_PROFILE_KEY, profileId)
+        }.apply()
     }
 
     fun delete(id: String) {
@@ -60,6 +71,14 @@ class ProfileRepository(context: Context) {
                     .put("fingerprint", it.fingerprint)
             )
         }
-        preferences.edit().putString("profiles", array.toString()).apply()
+        preferences.edit().apply {
+            putString(PROFILES_KEY, array.toString())
+            if (lastConnectedProfileId() == id) remove(LAST_CONNECTED_PROFILE_KEY)
+        }.apply()
+    }
+
+    private companion object {
+        const val PROFILES_KEY = "profiles"
+        const val LAST_CONNECTED_PROFILE_KEY = "last_connected_profile_id"
     }
 }

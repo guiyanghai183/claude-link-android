@@ -38,11 +38,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.11"
+APP_VERSION = "0.3.12"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_WEB_CONTEXT_CHARS = 300_000
+MAX_DIRECTORY_SUGGESTIONS = 12
 CHAT_MODES = {"claude", "terminal"}
 MAX_TERMINAL_COMMAND_CHARS = 16_000
 MAX_TERMINAL_OUTPUT_CHARS = 120_000
@@ -2075,6 +2076,39 @@ class ServiceState:
             "locations": self.filesystem_locations(),
         }
 
+    def suggest_directories(self, raw_path: str | None) -> dict[str, Any]:
+        """Complete an absolute path using only directories the service user can browse."""
+        typed = clean_text(raw_path or "").strip()
+        if not typed:
+            return {"suggestions": []}
+        candidate = Path(typed).expanduser()
+        if not candidate.is_absolute():
+            return {"suggestions": []}
+        trailing_separator = typed.endswith(("/", "\\"))
+        search_root = candidate if trailing_separator else candidate.parent
+        prefix = "" if trailing_separator else candidate.name
+        try:
+            search_root = search_root.resolve()
+        except OSError:
+            return {"suggestions": []}
+        if not self._can_browse_directory(search_root):
+            return {"suggestions": []}
+
+        suggestions: list[dict[str, str]] = []
+        try:
+            children = search_root.iterdir()
+            for child in children:
+                if prefix and not child.name.casefold().startswith(prefix.casefold()):
+                    continue
+                with contextlib.suppress(OSError):
+                    resolved_child = child.resolve()
+                    if self._can_browse_directory(resolved_child):
+                        suggestions.append({"name": child.name, "path": str(resolved_child)})
+        except OSError:
+            return {"suggestions": []}
+        suggestions.sort(key=lambda item: (item["name"].casefold(), item["name"]))
+        return {"suggestions": suggestions[:MAX_DIRECTORY_SUGGESTIONS]}
+
     @staticmethod
     def _resolve_filesystem_path(raw_path: str | None) -> Path:
         """Resolve absolute paths or home-relative paths for the SSH service user."""
@@ -2261,6 +2295,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             if parts == ["v1", "directories"]:
                 self._send_json(HTTPStatus.OK, self.state.list_directories(query.get("path", [None])[0]))
+                return
+            if parts == ["v1", "directories", "suggestions"]:
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.state.suggest_directories(query.get("path", [None])[0]),
+                )
                 return
             if parts == ["v1", "files"]:
                 self._send_json(
