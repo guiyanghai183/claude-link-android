@@ -322,6 +322,8 @@ class BridgeApi(private val localPort: Int) {
                             pid = process.optInt("pid"),
                             name = process.optString("name"),
                             memoryUsedMiB = process.optionalFloat("memoryUsedMiB"),
+                            user = process.optString("user"),
+                            running = process.optString("running"),
                         )
                     }.orEmpty(),
                 )

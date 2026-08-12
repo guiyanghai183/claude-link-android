@@ -25,6 +25,7 @@ from mobile_claude_server import (  # noqa: E402
     GPUQ_COMMAND_TIMEOUT_SECONDS,
     ServiceState,
     Store,
+    _fetch_process_metadata,
     extract_video_handoffs,
     fetch_deepseek_balance,
     fetch_gpu_snapshot,
@@ -715,6 +716,10 @@ class GpuSnapshotTests(unittest.TestCase):
         ]
         with (
             patch("mobile_claude_server._find_nvidia_smi", return_value="/usr/bin/nvidia-smi"),
+            patch(
+                "mobile_claude_server._fetch_process_metadata",
+                return_value={4242: {"user": "gyhai", "running": "05:35:14"}},
+            ),
             patch("mobile_claude_server.subprocess.run", side_effect=completed) as run,
         ):
             result = fetch_gpu_snapshot()
@@ -726,7 +731,15 @@ class GpuSnapshotTests(unittest.TestCase):
         self.assertIsNone(result["gpus"][0]["fanSpeedPercent"])
         self.assertEqual(
             result["gpus"][0]["processes"],
-            [{"pid": 4242, "name": "python", "memoryUsedMiB": 1024.0}],
+            [
+                {
+                    "pid": 4242,
+                    "name": "python",
+                    "memoryUsedMiB": 1024.0,
+                    "user": "gyhai",
+                    "running": "05:35:14",
+                }
+            ],
         )
         self.assertEqual(
             run.call_args_list[0].args[0],
@@ -747,6 +760,30 @@ class GpuSnapshotTests(unittest.TestCase):
         for call in run.call_args_list:
             self.assertEqual(call.kwargs["timeout"], GPU_COMMAND_TIMEOUT_SECONDS)
             self.assertNotIn("shell", call.kwargs)
+
+    def test_process_metadata_reports_user_and_elapsed_time(self):
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=" 4242 gyhai 05:35:14\n 7777 other 02-01:03:04\n",
+            stderr="",
+        )
+        with patch("mobile_claude_server.subprocess.run", return_value=completed) as run:
+            result = _fetch_process_metadata([7777, 4242, 4242])
+
+        self.assertEqual(
+            result,
+            {
+                4242: {"user": "gyhai", "running": "05:35:14"},
+                7777: {"user": "other", "running": "02-01:03:04"},
+            },
+        )
+        self.assertEqual(
+            run.call_args.args[0],
+            ["ps", "-o", "pid=,user=,etime=", "-p", "4242,7777"],
+        )
+        self.assertEqual(run.call_args.kwargs["timeout"], GPU_COMMAND_TIMEOUT_SECONDS)
+        self.assertNotIn("shell", run.call_args.kwargs)
 
     def test_driver_failure_is_a_non_fatal_unavailable_state(self):
         failed = subprocess.CompletedProcess([], 9, stdout="", stderr="driver unavailable\nsecret")

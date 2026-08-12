@@ -86,6 +86,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var activeChatGeneration = 0L
     private var busyTaskCount = 0
     private val pendingWebAttachments = mutableStateMapOf<String, WebAttachment>()
+    private val terminalDrafts = mutableStateMapOf<String, String>()
     private var ocrPreviewTargetChatId: String? = null
 
     val profiles = mutableStateListOf<ServerProfile>().apply { addAll(profileRepository.load()) }
@@ -380,6 +381,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         activeProfile = null
         activeChat = null
         pendingWebAttachments.clear()
+        terminalDrafts.clear()
         ocrPreviewTargetChatId = null
         ocrPreviewDraft = null
         chats.clear()
@@ -492,6 +494,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val chat = activeChat?.chat ?: return
         if (chat.mode != "terminal") return
         startTerminalSession(chat.id, chat.projectPath)
+    }
+
+    fun terminalDraft(chatId: String): String = terminalDrafts[chatId].orEmpty()
+
+    fun updateTerminalDraft(chatId: String, value: String) {
+        terminalDrafts[chatId] = value
+            .replace("\r", "")
+            .replace("\n", "")
+            .take(MAX_TERMINAL_COMMAND_CHARS)
+    }
+
+    fun clearTerminalDraft(chatId: String, expected: String? = null) {
+        if (expected == null || terminalDrafts[chatId].orEmpty() == expected) {
+            terminalDrafts.remove(chatId)
+        }
     }
 
     fun sendTerminalCommand(command: String, onAccepted: () -> Unit = {}) {
@@ -789,6 +806,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (terminalChatId == chatId) stopTerminalSession()
                 callBridge { it.deleteChat(chatId) }
                 pendingWebAttachments.remove(chatId)
+                terminalDrafts.remove(chatId)
                 if (ocrPreviewTargetChatId == chatId) cancelOcrPreview()
                 if (activeChat?.chat?.id == chatId) closeChat()
                 refreshChatsInternal()
@@ -1179,6 +1197,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         activeProfile = null
         activeChat = null
         pendingWebAttachments.clear()
+        terminalDrafts.clear()
         ocrPreviewTargetChatId = null
         ocrPreviewDraft = null
         chats.clear()

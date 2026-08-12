@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "增强 VPN 与 SSH 隧道稳定性：应用会感知网络变化、定时检查连接并在后台持续自动重连，重启后也会恢复上次服务器。服务器绝对路径输入新增有权限目录联想，选择项目目录和浏览服务器文件时均可使用。" \
+            --arg releaseNotes "修复远程终端输入法展开后草稿或最新输出不可见的问题。算力中心改为 GPUQ 任务与 NVIDIA 显卡两级入口，GPUQ 使用彩色状态表头；NVIDIA 计算进程新增服务器用户和已运行时间。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

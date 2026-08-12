@@ -23,6 +23,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1047,12 +1048,21 @@ private fun MessageList(
     dismissHeaderOnTap: Boolean = false,
 ) {
     val listState = rememberLazyListState()
+    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
     LaunchedEffect(
         detail.messages.size,
         detail.messages.lastOrNull()?.content,
         viewModel.terminalLiveOutput,
+        imeBottom,
     ) {
-        if (detail.messages.isNotEmpty()) listState.animateScrollToItem(detail.messages.lastIndex)
+        if (detail.messages.isNotEmpty()) {
+            if (imeBottom > 0) {
+                listState.scrollToItem(detail.messages.lastIndex)
+                listState.scrollBy(Float.MAX_VALUE)
+            } else {
+                listState.animateScrollToItem(detail.messages.lastIndex)
+            }
+        }
     }
     LazyColumn(
         modifier = modifier
@@ -1467,11 +1477,11 @@ private fun String.withoutVideoControlLines(): String = lineSequence()
     .trim()
 
 private const val MAX_VIDEOS_PER_MESSAGE = 2
-private const val MAX_TERMINAL_COMMAND_CHARS = 16_000
 
 @Composable
 private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
-    var text by remember(detail.chat.id) { mutableStateOf("") }
+    val chatId = detail.chat.id
+    val text = viewModel.terminalDraft(chatId)
     val history = detail.messages.filter { it.kind == "terminal_input" }.map { it.content }
     var historyIndex by remember(detail.chat.id) { mutableStateOf(history.size) }
     val status = viewModel.terminalStatus
@@ -1488,7 +1498,7 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
         if (!connected || viewModel.terminalCommandSending) return
         val submitted = text
         viewModel.sendTerminalCommand(submitted) {
-            if (text == submitted) text = ""
+            viewModel.clearTerminalDraft(chatId, submitted)
             historyIndex = history.size + 1
         }
     }
@@ -1541,7 +1551,7 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                     onClick = {
                         if (history.isNotEmpty()) {
                             historyIndex = (historyIndex - 1).coerceIn(0, history.lastIndex)
-                            text = history[historyIndex]
+                            viewModel.updateTerminalDraft(chatId, history[historyIndex])
                         }
                     },
                     enabled = !running && history.isNotEmpty(),
@@ -1551,10 +1561,10 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                     onClick = {
                         if (historyIndex < history.lastIndex) {
                             historyIndex += 1
-                            text = history[historyIndex]
+                            viewModel.updateTerminalDraft(chatId, history[historyIndex])
                         } else {
                             historyIndex = history.size
-                            text = ""
+                            viewModel.clearTerminalDraft(chatId)
                         }
                     },
                     enabled = !running && history.isNotEmpty(),
@@ -1566,7 +1576,7 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = {
-                        text = it.replace("\r", "").replace("\n", "").take(MAX_TERMINAL_COMMAND_CHARS)
+                        viewModel.updateTerminalDraft(chatId, it)
                         historyIndex = history.size
                     },
                     modifier = Modifier.weight(1f).height(44.dp),
@@ -2227,9 +2237,14 @@ private fun oneDecimal(value: Double): String {
 }
 
 private val NvidiaGreen = Color(0xFF76B900)
+private val QueueOrange = Color(0xFFFF9F0A)
+
+private enum class ComputeSection { GPUQ, NVIDIA }
 
 @Composable
 private fun GpuScreen(viewModel: AppViewModel) {
+    var sectionName by rememberSaveable { mutableStateOf<String?>(null) }
+    val section = sectionName?.let { name -> ComputeSection.entries.firstOrNull { it.name == name } }
     LifecycleStartEffect(viewModel) {
         viewModel.startGpuMonitoring()
         onStopOrDispose { viewModel.stopGpuMonitoring() }
@@ -2237,8 +2252,16 @@ private fun GpuScreen(viewModel: AppViewModel) {
     val snapshot = viewModel.gpuSnapshot
     Column(Modifier.fillMaxSize()) {
         ScreenHeader(
-            title = "算力中心",
-            subtitle = "GPU 状态与 gpuq 队列 · 每 2 秒更新",
+            title = when (section) {
+                ComputeSection.GPUQ -> "GPUQ 任务"
+                ComputeSection.NVIDIA -> "NVIDIA 显卡"
+                null -> "算力中心"
+            },
+            subtitle = when (section) {
+                ComputeSection.GPUQ -> "运行与排队任务 · 每 2 秒更新"
+                ComputeSection.NVIDIA -> "显卡遥测与计算进程 · 每 2 秒更新"
+                null -> "选择要查看的算力信息"
+            },
             action = {
                 IconButton(onClick = viewModel::refreshGpuStatus, enabled = !viewModel.gpuBusy) {
                     if (viewModel.gpuBusy && snapshot == null) {
@@ -2249,60 +2272,232 @@ private fun GpuScreen(viewModel: AppViewModel) {
                 }
             },
         )
-        when {
-            snapshot == null && viewModel.gpuBusy -> {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = NvidiaGreen)
-                        Spacer(Modifier.height(12.dp))
-                        Text("正在读取算力与队列状态…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        AnimatedContent(
+            targetState = section,
+            label = "compute-section",
+            modifier = Modifier.weight(1f),
+        ) { selectedSection ->
+            when {
+                snapshot == null && viewModel.gpuBusy -> {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = NvidiaGreen)
+                            Spacer(Modifier.height(12.dp))
+                            Text("正在读取算力与队列状态…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
-            }
-            snapshot == null -> GpuUnavailableCard(viewModel.gpuError ?: "暂时没有读取到服务器算力状态")
-            else -> {
-                LazyColumn(
-                    Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    item { GpuQueueCard(snapshot.queue) }
-                    if (snapshot.available) {
-                        item { GpuSummaryCard(snapshot) }
-                    } else {
-                        item {
-                            GpuTelemetryUnavailableCard(
-                                snapshot.message ?: "这台服务器没有可用的 NVIDIA GPU",
-                            )
-                        }
-                    }
-                    viewModel.gpuError?.let { message ->
-                        item {
-                            Text(
-                                "最近一次刷新失败：$message",
-                                color = MaterialTheme.colorScheme.error,
-                                fontSize = 11.sp,
-                                modifier = Modifier.padding(horizontal = 4.dp),
-                            )
-                        }
-                    }
-                    if (snapshot.available) {
-                        items(snapshot.gpus, key = { it.uuid.ifBlank { it.index.toString() } }) { gpu ->
-                            GpuDeviceCard(gpu, snapshot.processesAvailable)
-                        }
-                    }
-                    item {
-                        Text(
-                            "本页只读调用服务器本机 nvidia-smi 与 gpuq list，不会提交、取消或修改队列任务，也不调用 Claude 或 DeepSeek API；离开页面后自动停止刷新。",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 11.sp,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                        )
-                    }
-                }
+                snapshot == null -> GpuUnavailableCard(viewModel.gpuError ?: "暂时没有读取到服务器算力状态")
+                selectedSection == ComputeSection.GPUQ -> GpuQueueDetail(
+                    snapshot = snapshot,
+                    error = viewModel.gpuError,
+                    onBack = { sectionName = null },
+                )
+                selectedSection == ComputeSection.NVIDIA -> NvidiaDetail(
+                    snapshot = snapshot,
+                    error = viewModel.gpuError,
+                    onBack = { sectionName = null },
+                )
+                else -> ComputeSectionPicker(
+                    snapshot = snapshot,
+                    error = viewModel.gpuError,
+                    onSelect = { sectionName = it.name },
+                )
             }
         }
     }
+}
+
+@Composable
+private fun ComputeSectionPicker(
+    snapshot: GpuSnapshot,
+    error: String?,
+    onSelect: (ComputeSection) -> Unit,
+) {
+    val running = snapshot.queue.jobs.count { it.status == "running" }
+    val queued = snapshot.queue.jobs.count { it.status == "queued" }
+    val processCount = snapshot.gpus.sumOf { it.processes.size }
+    val averageLoad = snapshot.gpus.mapNotNull { it.gpuUtilizationPercent }
+        .takeIf { it.isNotEmpty() }
+        ?.average()
+        ?.roundToInt()
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(13.dp),
+    ) {
+        item {
+            ComputeSectionCard(
+                badge = "GPUQ",
+                title = "任务队列",
+                subtitle = "查看正在运行和等待分配的任务",
+                status = if (snapshot.queue.available) {
+                    "${snapshot.queue.jobs.size} 个活动任务"
+                } else {
+                    "当前不可用"
+                },
+                metrics = "运行 $running  ·  排队 $queued",
+                accent = QueueOrange,
+                colors = listOf(Color(0xFF20140A), Color(0xFF3C2410), Color(0xFF17120D)),
+                onClick = { onSelect(ComputeSection.GPUQ) },
+            )
+        }
+        item {
+            ComputeSectionCard(
+                badge = "NVIDIA",
+                title = "显卡状态",
+                subtitle = "查看负载、显存、温度与计算进程",
+                status = if (snapshot.available) "${snapshot.gpus.size} 张显卡" else "当前不可用",
+                metrics = "平均负载 ${averageLoad?.let { "$it%" } ?: "—"}  ·  进程 $processCount",
+                accent = NvidiaGreen,
+                colors = listOf(Color(0xFF101510), Color(0xFF1D2B13), Color(0xFF111411)),
+                onClick = { onSelect(ComputeSection.NVIDIA) },
+            )
+        }
+        error?.let { message -> item { RefreshFailureText(message) } }
+        item {
+            Text(
+                "数据只读来自服务器本机 gpuq list 与 nvidia-smi；不会提交、取消或修改任务。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ComputeSectionCard(
+    badge: String,
+    title: String,
+    subtitle: String,
+    status: String,
+    metrics: String,
+    accent: Color,
+    colors: List<Color>,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(25.dp))
+            .background(Brush.linearGradient(colors))
+            .clickable(onClick = onClick)
+            .padding(20.dp)
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(11.dp), color = accent.copy(alpha = 0.18f)) {
+                    Text(
+                        badge,
+                        color = accent,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                Text("›", color = accent, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(15.dp))
+            Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 23.sp)
+            Text(subtitle, color = Color.White.copy(alpha = 0.62f), fontSize = 11.sp)
+            Spacer(Modifier.height(17.dp))
+            Row(verticalAlignment = Alignment.Bottom) {
+                Column(Modifier.weight(1f)) {
+                    Text(status, color = accent, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text(metrics, color = Color.White.copy(alpha = 0.62f), fontSize = 10.sp)
+                }
+                Text("进入", color = Color.White.copy(alpha = 0.78f), fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GpuQueueDetail(snapshot: GpuSnapshot, error: String?, onBack: () -> Unit) {
+    val queue = snapshot.queue
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(11.dp),
+    ) {
+        item { ComputeBackRow(onBack) }
+        item { GpuQueueSummaryCard(queue) }
+        when {
+            !queue.available -> item {
+                ComputeMessageCard(queue.message ?: "gpuq 队列当前不可用", QueueOrange)
+            }
+            queue.jobs.isEmpty() -> item {
+                ComputeMessageCard("当前没有正在运行或排队中的 gpuq 任务", NvidiaGreen)
+            }
+            else -> items(queue.jobs, key = { it.id }) { job -> GpuQueueJobCard(job) }
+        }
+        error?.let { message -> item { RefreshFailureText(message) } }
+        item { ComputeReadOnlyNote("本页只读调用 gpuq list，不会提交、取消或修改队列任务。") }
+    }
+}
+
+@Composable
+private fun NvidiaDetail(snapshot: GpuSnapshot, error: String?, onBack: () -> Unit) {
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item { ComputeBackRow(onBack) }
+        if (snapshot.available) {
+            item { GpuSummaryCard(snapshot) }
+            items(snapshot.gpus, key = { it.uuid.ifBlank { it.index.toString() } }) { gpu ->
+                GpuDeviceCard(gpu, snapshot.processesAvailable)
+            }
+        } else {
+            item { GpuTelemetryUnavailableCard(snapshot.message ?: "这台服务器没有可用的 NVIDIA GPU") }
+        }
+        error?.let { message -> item { RefreshFailureText(message) } }
+        item { ComputeReadOnlyNote("本页只读调用 nvidia-smi，不会控制显卡或结束计算进程。") }
+    }
+}
+
+@Composable
+private fun ComputeBackRow(onBack: () -> Unit) {
+    TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp)) {
+        Icon(Icons.Default.ArrowBack, contentDescription = null, modifier = Modifier.size(17.dp))
+        Spacer(Modifier.width(5.dp))
+        Text("返回算力选择")
+    }
+}
+
+@Composable
+private fun ComputeMessageCard(message: String, accent: Color) {
+    Surface(shape = RoundedCornerShape(18.dp), color = accent.copy(alpha = 0.08f)) {
+        Text(
+            message,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth().padding(15.dp),
+        )
+    }
+}
+
+@Composable
+private fun RefreshFailureText(message: String) {
+    Text(
+        "最近一次刷新失败：$message",
+        color = MaterialTheme.colorScheme.error,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(horizontal = 4.dp),
+    )
+}
+
+@Composable
+private fun ComputeReadOnlyNote(message: String) {
+    Text(
+        message,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+    )
 }
 
 @Composable
@@ -2349,62 +2544,44 @@ private fun GpuTelemetryUnavailableCard(message: String) {
 }
 
 @Composable
-private fun GpuQueueCard(queue: GpuQueueSnapshot) {
+private fun GpuQueueSummaryCard(queue: GpuQueueSnapshot) {
     val running = queue.jobs.count { it.status == "running" }
     val queued = queue.jobs.count { it.status == "queued" }
-    Surface(shape = RoundedCornerShape(23.dp), color = MaterialTheme.colorScheme.surface) {
-        Column(Modifier.padding(18.dp)) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(26.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(Color(0xFF20140A), Color(0xFF3C2410), Color(0xFF17120D))
+                )
+            )
+            .padding(20.dp)
+    ) {
+        Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(shape = RoundedCornerShape(12.dp), color = NvidiaGreen.copy(alpha = 0.14f)) {
-                    Text(
-                        "gpuq",
-                        color = NvidiaGreen,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
-                    )
-                }
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("任务队列", fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                    Text(
-                        "只显示 gpuq list 中正在运行和等待的任务",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 10.sp,
-                    )
-                }
+                Box(Modifier.size(9.dp).clip(CircleShape).background(if (queue.available) QueueOrange else Color.Gray))
+                Spacer(Modifier.width(8.dp))
+                Text(if (queue.available) "LIVE" else "OFFLINE", color = QueueOrange, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
                 Text(
-                    queue.jobs.size.toString(),
-                    color = NvidiaGreen,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 25.sp,
+                    queue.timestamp.substringAfter('T', queue.timestamp).take(8),
+                    color = Color.White.copy(alpha = 0.58f),
+                    fontSize = 11.sp,
                 )
             }
             Spacer(Modifier.height(15.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                GpuMetricChip("运行中", running.toString(), NvidiaGreen, Modifier.weight(1f))
-                GpuMetricChip("排队中", queued.toString(), WarmOrange, Modifier.weight(1f))
-                GpuMetricChip("活动任务", queue.jobs.size.toString(), AppleBlue, Modifier.weight(1f))
-            }
-            HorizontalDivider(
-                Modifier.padding(vertical = 14.dp),
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+            Text("GPUQ 任务队列", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 23.sp)
+            Text(
+                "只显示正在运行和等待分配的任务",
+                color = Color.White.copy(alpha = 0.62f),
+                fontSize = 11.sp,
             )
-            when {
-                !queue.available -> Text(
-                    queue.message ?: "gpuq 队列当前不可用",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
-                )
-                queue.jobs.isEmpty() -> Text(
-                    "当前没有正在运行或排队中的 gpuq 任务",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
-                )
-                else -> queue.jobs.forEachIndexed { index, job ->
-                    if (index > 0) Spacer(Modifier.height(9.dp))
-                    GpuQueueJobCard(job)
-                }
+            Spacer(Modifier.height(18.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                GpuSummaryMetric(running.toString(), "运行中")
+                GpuSummaryMetric(queued.toString(), "排队中")
+                GpuSummaryMetric(queue.jobs.size.toString(), "活动任务")
             }
         }
     }
@@ -2624,19 +2801,42 @@ private fun GpuDeviceCard(gpu: GpuInfo, processesAvailable: Boolean) {
                     fontSize = 11.sp,
                 )
                 else -> gpu.processes.forEach { process ->
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    Surface(
+                        shape = RoundedCornerShape(13.dp),
+                        color = NvidiaGreen.copy(alpha = 0.065f),
+                        modifier = Modifier.fillMaxWidth().padding(top = 7.dp),
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(process.name, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("PID ${process.pid}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 9.sp)
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    process.name,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    buildList {
+                                        add("PID ${process.pid}")
+                                        process.user.takeIf { it.isNotBlank() }?.let { add("用户 $it") }
+                                        process.running.takeIf { it.isNotBlank() }?.let { add("已运行 $it") }
+                                    }.joinToString(" · "),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 9.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Text(
+                                process.memoryUsedMiB?.let { "${it.gibText()} GiB" } ?: "—",
+                                color = NvidiaGreen,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
                         }
-                        Text(
-                            process.memoryUsedMiB?.let { "${it.gibText()} GiB" } ?: "—",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
                     }
                 }
             }

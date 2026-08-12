@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.12"
+APP_VERSION = "0.3.13"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -171,6 +171,41 @@ def _gpu_unavailable(reason: str, message: str) -> dict[str, Any]:
     }
 
 
+def _fetch_process_metadata(pids: list[int]) -> dict[int, dict[str, str]]:
+    """Return the OS user and elapsed wall time for visible compute processes."""
+    unique_pids = sorted({pid for pid in pids if pid > 0})
+    if not unique_pids:
+        return {}
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "pid=,user=,etime=", "-p", ",".join(map(str, unique_pids))],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GPU_COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode != 0:
+        return {}
+
+    metadata: dict[int, dict[str, str]] = {}
+    for line in clean_text(result.stdout).splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        pid = _optional_int(parts[0])
+        if pid is None or pid not in unique_pids:
+            continue
+        metadata[pid] = {
+            "user": parts[1].strip()[:64],
+            "running": parts[2].strip()[:32],
+        }
+    return metadata
+
+
 def fetch_gpu_snapshot() -> dict[str, Any]:
     """Read NVIDIA telemetry locally; expected hardware failures are non-fatal."""
     executable = _find_nvidia_smi()
@@ -243,17 +278,24 @@ def fetch_gpu_snapshot() -> dict[str, Any]:
         if process_result.returncode == 0:
             processes_available = True
             by_uuid = {gpu["uuid"]: gpu for gpu in gpus if gpu["uuid"]}
-            for record in _csv_records(process_result.stdout, GPU_PROCESS_QUERY_FIELDS):
+            process_records = _csv_records(process_result.stdout, GPU_PROCESS_QUERY_FIELDS)
+            metadata = _fetch_process_metadata(
+                [pid for record in process_records if (pid := _optional_int(record["pid"])) is not None]
+            )
+            for record in process_records:
                 gpu = by_uuid.get(record["gpu_uuid"])
                 pid = _optional_int(record["pid"])
                 if gpu is None or pid is None:
                     continue
                 process_name = os.path.basename(record["process_name"].replace("\\", "/"))[:120]
+                process_metadata = metadata.get(pid, {})
                 gpu["processes"].append(
                     {
                         "pid": pid,
                         "name": process_name or "进程",
                         "memoryUsedMiB": _optional_float(record["used_memory"]),
+                        "user": process_metadata.get("user", ""),
+                        "running": process_metadata.get("running", ""),
                     }
                 )
     except (OSError, subprocess.TimeoutExpired, csv.Error, KeyError, TypeError, ValueError):

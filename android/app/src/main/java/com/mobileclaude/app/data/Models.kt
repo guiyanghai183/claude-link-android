@@ -110,6 +110,8 @@ data class GpuProcessInfo(
     val pid: Int,
     val name: String,
     val memoryUsedMiB: Float?,
+    val user: String,
+    val running: String,
 )
 
 data class GpuInfo(
