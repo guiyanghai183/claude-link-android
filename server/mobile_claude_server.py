@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.13"
+APP_VERSION = "0.3.14"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024

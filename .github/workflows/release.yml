@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复远程终端输入法展开后草稿或最新输出不可见的问题。算力中心改为 GPUQ 任务与 NVIDIA 显卡两级入口，GPUQ 使用彩色状态表头；NVIDIA 计算进程新增服务器用户和已运行时间。" \
+            --arg releaseNotes "修复远程终端输入框高度过小导致英文、中文候选组合文字和光标下半部分被裁切的问题；输入法展开时文字现在会完整显示，同时继续保留按对话保存的终端草稿和最新输出定位。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

@@ -21,8 +21,8 @@ android {
         applicationId = "com.mobileclaude.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.3.13"
+        versionCode = 21
+        versionName = "0.3.14"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"${githubRepository.get()}\"")
     }
 

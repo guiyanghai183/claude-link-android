@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
@@ -1477,6 +1478,7 @@ private fun String.withoutVideoControlLines(): String = lineSequence()
     .trim()
 
 private const val MAX_VIDEOS_PER_MESSAGE = 2
+internal const val TERMINAL_INPUT_MIN_HEIGHT_DP = 56
 
 @Composable
 private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
@@ -1579,7 +1581,11 @@ private fun TerminalComposer(viewModel: AppViewModel, detail: ChatDetail) {
                         viewModel.updateTerminalDraft(chatId, it)
                         historyIndex = history.size
                     },
-                    modifier = Modifier.weight(1f).height(44.dp),
+                    // Material3 needs its normal minimum height to lay out the text baseline,
+                    // cursor, and IME composing text without clipping descenders.
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = TERMINAL_INPUT_MIN_HEIGHT_DP.dp),
                     singleLine = true,
                     enabled = connected && !viewModel.terminalCommandSending,
                     placeholder = {
