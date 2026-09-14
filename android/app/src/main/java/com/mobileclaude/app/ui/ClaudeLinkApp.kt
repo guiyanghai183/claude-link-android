@@ -417,26 +417,35 @@ private fun UpdateSettingsCard(viewModel: AppViewModel) {
         UpdateState.Checking -> "正在检查 GitHub Release…"
         UpdateState.UpToDate -> "已经是最新版本"
         is UpdateState.Available -> "发现新版本 ${state.update.versionName}"
-        is UpdateState.Downloading -> "正在下载并校验 ${state.update.versionName}…"
+        is UpdateState.Downloading -> state.downloadProgressText()
         is UpdateState.Ready -> "版本 ${state.update.versionName} 已下载"
         is UpdateState.Error -> state.message
         UpdateState.Idle -> "自动检查 GitHub Release"
     }
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
-        Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(13.dp), color = AppleBlue.copy(alpha = 0.11f)) {
-                Text("↻", color = AppleBlue, fontSize = 22.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp))
+        Column(Modifier.fillMaxWidth().padding(18.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(13.dp), color = AppleBlue.copy(alpha = 0.11f)) {
+                    Text("↻", color = AppleBlue, fontSize = 22.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("版本 ${BuildConfig.VERSION_NAME}", fontWeight = FontWeight.SemiBold)
+                    Text(subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+                }
+                when (state) {
+                    UpdateState.Checking -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                    is UpdateState.Downloading -> state.percent?.let {
+                        Text("$it%", color = AppleBlue, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                    }
+                    is UpdateState.Available -> TextButton(onClick = viewModel::downloadUpdate) { Text("更新") }
+                    is UpdateState.Ready -> TextButton(onClick = viewModel::installUpdate) { Text("安装") }
+                    else -> TextButton(onClick = { viewModel.checkForUpdates() }) { Text("检查") }
+                }
             }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("版本 ${BuildConfig.VERSION_NAME}", fontWeight = FontWeight.SemiBold)
-                Text(subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
-            }
-            when (state) {
-                UpdateState.Checking, is UpdateState.Downloading -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                is UpdateState.Available -> TextButton(onClick = viewModel::downloadUpdate) { Text("更新") }
-                is UpdateState.Ready -> TextButton(onClick = viewModel::installUpdate) { Text("安装") }
-                else -> TextButton(onClick = { viewModel.checkForUpdates() }) { Text("检查") }
+            if (state is UpdateState.Downloading) {
+                Spacer(Modifier.height(12.dp))
+                UpdateDownloadProgressBar(state)
             }
         }
     }
@@ -462,12 +471,18 @@ private fun UpdateDialog(viewModel: AppViewModel) {
         )
         is UpdateState.Downloading -> AlertDialog(
             onDismissRequest = {},
-            title = { Text("正在准备更新") },
+            title = { Text("正在下载更新") },
             text = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Text("正在下载并校验 ${state.update.versionName}，请稍候…")
+                Column {
+                    Text("版本 ${state.update.versionName}")
+                    Spacer(Modifier.height(12.dp))
+                    UpdateDownloadProgressBar(state)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        state.downloadProgressText(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
                 }
             },
             confirmButton = {},
@@ -480,6 +495,39 @@ private fun UpdateDialog(viewModel: AppViewModel) {
             dismissButton = { TextButton(onClick = viewModel::dismissUpdate) { Text("稍后") } },
         )
         else -> Unit
+    }
+}
+
+@Composable
+private fun UpdateDownloadProgressBar(state: UpdateState.Downloading) {
+    val modifier = Modifier
+        .fillMaxWidth()
+        .height(8.dp)
+        .clip(CircleShape)
+    val progress = state.progress
+    if (progress != null) {
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = modifier,
+            color = AppleBlue,
+            trackColor = AppleBlue.copy(alpha = 0.14f),
+        )
+    } else {
+        LinearProgressIndicator(
+            modifier = modifier,
+            color = AppleBlue,
+            trackColor = AppleBlue.copy(alpha = 0.14f),
+        )
+    }
+}
+
+private fun UpdateState.Downloading.downloadProgressText(): String {
+    val downloaded = downloadedBytes.coerceAtLeast(0L).remoteFileSize()
+    val total = totalBytes?.takeIf { it > 0L }?.remoteFileSize()
+    return if (total != null) {
+        "正在下载并校验 ${update.versionName} · $downloaded / $total · ${percent ?: 0}%"
+    } else {
+        "正在下载并校验 ${update.versionName} · 已下载 $downloaded"
     }
 }
 

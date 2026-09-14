@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复远程终端输入框高度过小导致英文、中文候选组合文字和光标下半部分被裁切的问题；输入法展开时文字现在会完整显示，同时继续保留按对话保存的终端草稿和最新输出定位。" \
+            --arg releaseNotes "修复 74 号机 gpuq 新版默认 I/O 列与紧凑布局导致算力页面无法解析任务状态的问题，并兼容旧版 gpuq；应用内更新下载现在显示实时进度、已下载大小与总大小。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

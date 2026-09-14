@@ -860,9 +860,36 @@ class GpuqSnapshotTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(run.call_args.args[0], ["/home/tester/.local/bin/gpuq", "list"])
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/home/tester/.local/bin/gpuq", "list", "--format", "wide", "--no-io"],
+        )
         self.assertEqual(run.call_args.kwargs["timeout"], GPUQ_COMMAND_TIMEOUT_SECONDS)
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_legacy_gpuq_fallback_when_stable_flags_are_unsupported(self):
+        unsupported = subprocess.CompletedProcess(
+            [],
+            2,
+            stdout="",
+            stderr="gpuq: error: unrecognized arguments: --format wide --no-io\n",
+        )
+        completed = subprocess.CompletedProcess([], 0, stdout=self.TABLE, stderr="")
+        with (
+            patch("mobile_claude_server._find_gpuq", return_value="/home/tester/.local/bin/gpuq"),
+            patch("mobile_claude_server.subprocess.run", side_effect=[unsupported, completed]) as run,
+        ):
+            result = fetch_gpuq_snapshot()
+
+        self.assertTrue(result["available"])
+        self.assertEqual(len(result["jobs"]), 2)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["/home/tester/.local/bin/gpuq", "list", "--format", "wide", "--no-io"],
+                ["/home/tester/.local/bin/gpuq", "list"],
+            ],
+        )
 
     def test_empty_active_queue_is_available(self):
         completed = subprocess.CompletedProcess([], 0, stdout="队列为空\n", stderr="")

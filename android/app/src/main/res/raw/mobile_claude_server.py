@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.14"
+APP_VERSION = "0.3.15"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -71,6 +71,8 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 GPU_CACHE_TTL_SECONDS = 0.8
 GPU_COMMAND_TIMEOUT_SECONDS = 3
 GPUQ_COMMAND_TIMEOUT_SECONDS = 3
+GPUQ_STABLE_LIST_ARGS = ("list", "--format", "wide", "--no-io")
+GPUQ_LEGACY_LIST_ARGS = ("list",)
 GPU_QUERY_FIELDS = (
     "index",
     "uuid",
@@ -362,14 +364,28 @@ def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
     return jobs
 
 
+def _gpuq_list_flags_unsupported(result: subprocess.CompletedProcess[str]) -> bool:
+    """Return whether an older gpuq rejected the stable list-format flags."""
+    detail = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
+    return any(
+        marker in detail
+        for marker in (
+            "unrecognized arguments",
+            "unknown argument",
+            "unknown option",
+            "no such option",
+        )
+    )
+
+
 def fetch_gpuq_snapshot() -> dict[str, Any]:
-    """Read the active gpuq queue. This is deliberately list-only and non-mutating."""
+    """Read the active gpuq queue using a stable, non-mutating text layout."""
     executable = _find_gpuq()
     if not executable:
         return _gpuq_unavailable("gpuq_not_found", "服务器未安装 gpuq")
     try:
         result = subprocess.run(
-            [executable, "list"],
+            [executable, *GPUQ_STABLE_LIST_ARGS],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -381,6 +397,21 @@ def fetch_gpuq_snapshot() -> dict[str, Any]:
         return _gpuq_unavailable("timeout", "gpuq list 查询超时")
     except OSError as exc:
         return _gpuq_unavailable("command_failed", str(exc) or "无法运行 gpuq list")
+    if result.returncode != 0 and _gpuq_list_flags_unsupported(result):
+        try:
+            result = subprocess.run(
+                [executable, *GPUQ_LEGACY_LIST_ARGS],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=GPUQ_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return _gpuq_unavailable("timeout", "gpuq list 查询超时")
+        except OSError as exc:
+            return _gpuq_unavailable("command_failed", str(exc) or "无法运行 gpuq list")
     if result.returncode != 0:
         detail = result.stderr or result.stdout or "gpuq list 当前不可用"
         return _gpuq_unavailable("command_failed", detail)

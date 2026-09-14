@@ -53,7 +53,10 @@ class GitHubUpdateManager(private val context: Context) {
         return update.takeIf { it.versionCode > BuildConfig.VERSION_CODE }
     }
 
-    fun download(update: AppUpdate): File {
+    suspend fun download(
+        update: AppUpdate,
+        onProgress: suspend (downloadedBytes: Long, totalBytes: Long?) -> Unit = { _, _ -> },
+    ): File {
         val directory = context.getExternalFilesDir("updates")
             ?: throw IOException("无法创建更新目录")
         directory.mkdirs()
@@ -71,10 +74,14 @@ class GitHubUpdateManager(private val context: Context) {
             }
             val length = connection.contentLengthLong
             if (length > MAX_APK_BYTES) throw IOException("更新包超过大小限制")
+            val totalBytes = length.takeIf { it > 0L }
+            onProgress(0L, totalBytes)
             connection.inputStream.use { input ->
                 partial.outputStream().buffered().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     var total = 0L
+                    var lastReportedBytes = 0L
+                    var lastReportedPercent = -1
                     while (true) {
                         val count = input.read(buffer)
                         if (count < 0) break
@@ -82,7 +89,21 @@ class GitHubUpdateManager(private val context: Context) {
                         if (total > MAX_APK_BYTES) throw IOException("更新包超过大小限制")
                         digest.update(buffer, 0, count)
                         output.write(buffer, 0, count)
+                        val currentPercent = totalBytes?.let { expected ->
+                            (total.toDouble() / expected.toDouble() * 100.0).toInt().coerceIn(0, 100)
+                        }
+                        val shouldReport = if (currentPercent != null) {
+                            currentPercent > lastReportedPercent
+                        } else {
+                            total - lastReportedBytes >= PROGRESS_REPORT_INTERVAL_BYTES
+                        }
+                        if (shouldReport) {
+                            onProgress(total, totalBytes)
+                            lastReportedBytes = total
+                            if (currentPercent != null) lastReportedPercent = currentPercent
+                        }
                     }
+                    onProgress(total, totalBytes)
                 }
             }
         } catch (error: Throwable) {
@@ -159,6 +180,7 @@ class GitHubUpdateManager(private val context: Context) {
         private const val MAX_REDIRECTS = 6
         private const val MAX_MANIFEST_BYTES = 512 * 1024
         private const val MAX_APK_BYTES = 250L * 1024 * 1024
+        private const val PROGRESS_REPORT_INTERVAL_BYTES = 512L * 1024
         private val REPOSITORY_PATTERN = Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
         private val SHA256_PATTERN = Regex("^[a-fA-F0-9]{64}$")
     }

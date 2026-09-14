@@ -251,9 +251,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             else -> return
         }
         viewModelScope.launch {
-            updateState = UpdateState.Downloading(update)
+            updateState = UpdateState.Downloading(update = update)
             try {
-                val apk = withContext(Dispatchers.IO) { updateManager.download(update) }
+                val apk = withContext(Dispatchers.IO) {
+                    updateManager.download(update) { downloadedBytes, totalBytes ->
+                        withContext(Dispatchers.Main.immediate) {
+                            if ((updateState as? UpdateState.Downloading)?.update == update) {
+                                updateState = UpdateState.Downloading(
+                                    update = update,
+                                    downloadedBytes = downloadedBytes,
+                                    totalBytes = totalBytes,
+                                )
+                            }
+                        }
+                    }
+                }
                 updateState = UpdateState.Ready(update, apk.absolutePath)
                 installUpdate()
             } catch (error: Throwable) {
