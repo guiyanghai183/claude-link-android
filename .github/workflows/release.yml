@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "浏览器入口升级为 DeepSeek 本地 API 对话：支持流式回复、多轮历史、新建与删除、失败重试，聊天记录在手机端加密保存；原对话导航更名为项目。" \
+            --arg releaseNotes "DeepSeek API Key 现在只需输入一次，即可在重启应用或切换服务器后自动复用；已有按服务器保存的密钥自动迁移为应用级加密密钥，并避免在输入期间保存明文界面状态。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

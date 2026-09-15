@@ -650,7 +650,7 @@ private fun PrivacyCard() {
 @Composable
 private fun DeepSeekBalanceCard(viewModel: AppViewModel) {
     var editing by rememberSaveable { mutableStateOf(false) }
-    var apiKey by rememberSaveable { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
     var apiKeyVisible by rememberSaveable { mutableStateOf(false) }
     val balance = viewModel.deepSeekBalance?.balanceInfos?.firstOrNull()
 
@@ -663,7 +663,7 @@ private fun DeepSeekBalanceCard(viewModel: AppViewModel) {
                 Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
                     Text("DeepSeek API 余额", fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                    Text("密钥仅加密保存在手机；每次查询经 SSH 临时转发", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("一次设置，各服务器复用；余额查询经 SSH 临时转发", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (viewModel.deepSeekConfigured) {
                     IconButton(onClick = viewModel::refreshDeepSeekBalance, enabled = !viewModel.deepSeekBusy) {
@@ -2980,7 +2980,7 @@ private fun DeepSeekChatScreen(viewModel: AppViewModel) {
             ) {
                 Text("连接 DeepSeek", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
-                Text("使用你的 API Key 在手机上直接对话。对话不经过项目服务器，历史记录加密保存在手机。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("API Key 只需输入一次，之后自动记忆。对话不经过项目服务器，历史记录加密保存在手机。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(20.dp))
                 OutlinedTextField(
                     value = apiKey,

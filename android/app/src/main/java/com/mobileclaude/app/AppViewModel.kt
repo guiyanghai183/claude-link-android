@@ -63,6 +63,7 @@ import java.net.UnknownHostException
 import java.util.UUID
 
 private const val MAX_WEB_ATTACHMENT_CHARS = 300_000
+private const val GLOBAL_DEEPSEEK_SECRET = "deepseek_api_key"
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val profileRepository = ProfileRepository(application)
@@ -1002,7 +1003,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveDeepSeekApiKey(value: String) {
-        val profile = activeProfile ?: run {
+        if (activeProfile == null) {
             errorMessage = "请先连接服务器"
             return
         }
@@ -1012,7 +1013,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         try {
-            vault.saveSecret(deepSeekSecretName(profile.id), secret)
+            vault.saveSecret(GLOBAL_DEEPSEEK_SECRET, secret)
             deepSeekConfigured = true
             refreshDeepSeekBalance()
         } finally {
@@ -1021,16 +1022,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun removeDeepSeekApiKey() {
-        val profile = activeProfile ?: return
         stopDeepSeekAnswer()
-        vault.deleteSecret(deepSeekSecretName(profile.id))
+        vault.deleteSecret(GLOBAL_DEEPSEEK_SECRET)
+        // Remove legacy per-server copies too, so an explicitly removed key cannot reappear.
+        profiles.forEach { vault.deleteSecret(deepSeekSecretName(it.id)) }
         deepSeekConfigured = false
         deepSeekBalance = null
     }
 
     fun refreshDeepSeekBalance() {
         val profile = activeProfile ?: return
-        val key = vault.loadSecret(deepSeekSecretName(profile.id)) ?: run {
+        val key = loadDeepSeekApiKey(profile.id) ?: run {
             deepSeekConfigured = false
             errorMessage = "请先设置 DeepSeek API Key"
             return
@@ -1143,7 +1145,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun requestDeepSeekAnswer(profileId: String, chat: DeepSeekConversation) {
-        val key = vault.loadSecret(deepSeekSecretName(profileId)) ?: run {
+        val key = loadDeepSeekApiKey(profileId) ?: run {
             errorMessage = "请先在服务器页设置 DeepSeek API Key"
             return
         }
@@ -1593,7 +1595,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         deepSeekChatJob = null
         deepSeekChatSending = false
         deepSeekStreamingText = ""
-        deepSeekConfigured = vault.loadSecret(deepSeekSecretName(profile.id))?.also { it.fill(0) } != null
+        deepSeekConfigured = loadDeepSeekApiKey(profile.id)?.also { it.fill(0) } != null
         deepSeekBalance = null
         deepSeekConversations.clear()
         deepSeekConversations.addAll(deepSeekChatsRepository.load(profile.id))
@@ -1601,6 +1603,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun deepSeekSecretName(profileId: String) = "deepseek_$profileId"
+
+    private fun loadDeepSeekApiKey(profileId: String): ByteArray? {
+        vault.loadSecret(GLOBAL_DEEPSEEK_SECRET)?.let { return it }
+        // Upgrade an already configured installation without asking for the key again.
+        val legacy = vault.loadSecret(deepSeekSecretName(profileId)) ?: return null
+        try {
+            vault.saveSecret(GLOBAL_DEEPSEEK_SECRET, legacy)
+            return legacy
+        } catch (error: Throwable) {
+            legacy.fill(0)
+            throw error
+        }
+    }
 
     private suspend fun runTask(block: suspend () -> Unit) {
         busyTaskCount += 1
