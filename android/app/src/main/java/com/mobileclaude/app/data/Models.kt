@@ -164,7 +164,7 @@ data class GpuSnapshot(
     val queue: GpuQueueSnapshot,
 )
 
-enum class MainTab { CHATS, BROWSER, FILES, GPU, SERVERS }
+enum class MainTab { CHATS, DEEPSEEK, FILES, GPU, SERVERS }
 
 sealed interface TerminalStatus {
     data object Disconnected : TerminalStatus

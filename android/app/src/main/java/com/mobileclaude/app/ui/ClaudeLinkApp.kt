@@ -24,6 +24,8 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -191,7 +193,7 @@ fun ClaudeLinkApp(viewModel: AppViewModel) {
                         } else {
                             ChatScreen(viewModel, viewModel.activeChat!!)
                         }
-                        MainTab.BROWSER -> BrowserScreen(viewModel)
+                        MainTab.DEEPSEEK -> DeepSeekChatScreen(viewModel)
                         MainTab.FILES -> RemoteFilesScreen(viewModel)
                         MainTab.GPU -> GpuScreen(viewModel)
                         MainTab.SERVERS -> ServerLanding(viewModel)
@@ -315,8 +317,8 @@ private fun BottomTabs(selected: MainTab, onSelect: (MainTab) -> Unit) {
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TabButton("◉", "对话", selected == MainTab.CHATS, Modifier.weight(1f)) { onSelect(MainTab.CHATS) }
-            TabButton("◎", "浏览器", selected == MainTab.BROWSER, Modifier.weight(1f)) { onSelect(MainTab.BROWSER) }
+            TabButton("◉", "项目", selected == MainTab.CHATS, Modifier.weight(1f)) { onSelect(MainTab.CHATS) }
+            TabButton("✦", "DeepSeek", selected == MainTab.DEEPSEEK, Modifier.weight(1f)) { onSelect(MainTab.DEEPSEEK) }
             TabButton("▤", "文件", selected == MainTab.FILES, Modifier.weight(1f)) { onSelect(MainTab.FILES) }
             TabButton("▥", "算力", selected == MainTab.GPU, Modifier.weight(1f)) { onSelect(MainTab.GPU) }
             TabButton("▣", "服务器", selected == MainTab.SERVERS, Modifier.weight(1f)) { onSelect(MainTab.SERVERS) }
@@ -884,7 +886,7 @@ private fun PasswordEye(visible: Boolean) {
 private fun ChatHistoryScreen(viewModel: AppViewModel) {
     Column(Modifier.fillMaxSize()) {
         ScreenHeader(
-            title = "对话",
+            title = "项目",
             subtitle = (viewModel.connectionStatus as? ConnectionStatus.Connected)?.health?.hostname,
             action = {
                 IconButton(onClick = { viewModel.showFolderPicker() }) {
@@ -2930,6 +2932,216 @@ private fun GpuMetricChip(label: String, value: String, color: Color, modifier: 
 private fun Float.gibText(): String {
     val tenths = (this / 1024f * 10f).roundToInt()
     return "${tenths / 10}.${kotlin.math.abs(tenths % 10)}"
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DeepSeekChatScreen(viewModel: AppViewModel) {
+    var draft by rememberSaveable { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
+    var showHistory by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<String?>(null) }
+    val chat = viewModel.activeDeepSeekConversation
+    val messages = chat?.messages.orEmpty()
+    val listState = rememberLazyListState()
+    LaunchedEffect(chat?.id, messages.size, viewModel.deepSeekStreamingText) {
+        val count = messages.size + (if (messages.isEmpty()) 1 else 0) + (if (viewModel.deepSeekChatSending) 1 else 0)
+        if (count > 0) listState.animateScrollToItem(count - 1)
+    }
+
+    Column(Modifier.fillMaxSize().imePadding()) {
+        Row(
+            Modifier.fillMaxWidth()
+                .padding(WindowInsets.statusBars.asPaddingValues())
+                .padding(horizontal = 18.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("DeepSeek", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    chat?.title ?: "本机对话 · DeepSeek Flash",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = { showHistory = true }) { Text("历史") }
+            IconButton(onClick = viewModel::newDeepSeekConversation, enabled = !viewModel.deepSeekChatSending) {
+                Icon(Icons.Default.Add, contentDescription = "新建 DeepSeek 对话", tint = AppleBlue)
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+
+        if (!viewModel.deepSeekConfigured) {
+            Column(
+                Modifier.weight(1f).fillMaxWidth().padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text("连接 DeepSeek", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("使用你的 API Key 在手机上直接对话。对话不经过项目服务器，历史记录加密保存在手机。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(20.dp))
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("DeepSeek API Key") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { viewModel.saveDeepSeekApiKey(apiKey); apiKey = "" }, enabled = apiKey.isNotBlank()) {
+                    Text("保存并开始")
+                }
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                if (messages.isEmpty()) {
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(top = 80.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("✦", color = AppleBlue, fontSize = 36.sp)
+                            Spacer(Modifier.height(14.dp))
+                            Text("有什么想聊的？", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(5.dp))
+                            Text("直接提问，或开启一段新的思考。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                items(messages) { message ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (message.role == "user") Arrangement.End else Arrangement.Start,
+                    ) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(if (message.role == "user") 0.84f else 0.96f),
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (message.role == "user") AppleBlue else MaterialTheme.colorScheme.surface,
+                            shadowElevation = if (message.role == "user") 0.dp else 1.dp,
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    message.content,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                                    color = if (message.role == "user") Color.White else MaterialTheme.colorScheme.onSurface,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                            }
+                        }
+                    }
+                }
+                if (viewModel.deepSeekChatSending) {
+                    item {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(0.96f),
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                        ) {
+                            if (viewModel.deepSeekStreamingText.isBlank()) {
+                                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text("正在思考…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            } else {
+                                SelectionContainer {
+                                    Text(viewModel.deepSeekStreamingText, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge)
+                                }
+                            }
+                        }
+                    }
+                } else if (messages.lastOrNull()?.role == "user") {
+                    item {
+                        TextButton(onClick = viewModel::retryDeepSeekAnswer) { Text("回答中断 · 点击重试") }
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(22.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 2.dp,
+                ) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("发送消息给 DeepSeek…") },
+                        maxLines = 5,
+                        shape = RoundedCornerShape(22.dp),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                IconButton(
+                    onClick = {
+                        if (viewModel.deepSeekChatSending) viewModel.stopDeepSeekAnswer()
+                        else if (draft.isNotBlank()) { viewModel.sendDeepSeekMessage(draft); draft = "" }
+                    },
+                    enabled = viewModel.deepSeekChatSending || draft.isNotBlank(),
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(
+                        if (viewModel.deepSeekChatSending) Icons.Default.Close else Icons.Default.Send,
+                        contentDescription = if (viewModel.deepSeekChatSending) "停止生成" else "发送消息",
+                        tint = AppleBlue,
+                    )
+                }
+            }
+        }
+    }
+
+    if (showHistory) {
+        ModalBottomSheet(onDismissRequest = { showHistory = false }) {
+            Column(
+                Modifier.fillMaxWidth().fillMaxHeight(0.75f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 18.dp, vertical = 12.dp),
+            ) {
+                Text("DeepSeek 对话", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = { viewModel.newDeepSeekConversation(); showHistory = false }, enabled = !viewModel.deepSeekChatSending) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("新对话")
+                }
+                viewModel.deepSeekConversations.forEach { conversation ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = { viewModel.selectDeepSeekConversation(conversation.id); showHistory = false },
+                            enabled = !viewModel.deepSeekChatSending,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+                        }
+                        IconButton(onClick = { deleteTarget = conversation.id }, enabled = !viewModel.deepSeekChatSending) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除 ${conversation.title}")
+                        }
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
+            }
+        }
+    }
+    if (deleteTarget != null) {
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除这段 DeepSeek 对话？") },
+            text = { Text("手机上的这段对话记录会永久删除。") },
+            confirmButton = {
+                TextButton(onClick = { deleteTarget?.let(viewModel::deleteDeepSeekConversation); deleteTarget = null }) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
+        )
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")

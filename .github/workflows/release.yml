@@ -89,7 +89,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复 74 号机 gpuq 新版默认 I/O 列与紧凑布局导致算力页面无法解析任务状态的问题，并兼容旧版 gpuq；应用内更新下载现在显示实时进度、已下载大小与总大小。" \
+            --arg releaseNotes "浏览器入口升级为 DeepSeek 本地 API 对话：支持流式回复、多轮历史、新建与删除、失败重试，聊天记录在手机端加密保存；原对话导航更名为项目。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

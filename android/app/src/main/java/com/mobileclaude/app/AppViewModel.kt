@@ -18,6 +18,9 @@ import com.mobileclaude.app.data.ChatDetail
 import com.mobileclaude.app.data.ChatSummary
 import com.mobileclaude.app.data.ConnectionStatus
 import com.mobileclaude.app.data.DeepSeekBalance
+import com.mobileclaude.app.data.DeepSeekChatRepository
+import com.mobileclaude.app.data.DeepSeekConversation
+import com.mobileclaude.app.data.DeepSeekMessage
 import com.mobileclaude.app.data.DirectoryListing
 import com.mobileclaude.app.data.GpuSnapshot
 import com.mobileclaude.app.data.MainTab
@@ -30,6 +33,7 @@ import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.WebAttachment
 import com.mobileclaude.app.data.UpdateState
 import com.mobileclaude.app.network.BridgeApi
+import com.mobileclaude.app.network.DeepSeekChatClient
 import com.mobileclaude.app.security.CredentialVault
 import com.mobileclaude.app.ssh.SshTunnelManager
 import com.mobileclaude.app.ssh.SshTerminalSession
@@ -63,6 +67,10 @@ private const val MAX_WEB_ATTACHMENT_CHARS = 300_000
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val profileRepository = ProfileRepository(application)
     private val vault = CredentialVault(application)
+    private val deepSeekChatsRepository = DeepSeekChatRepository(vault)
+    private val deepSeekChatClient = DeepSeekChatClient()
+    private var deepSeekChatJob: Job? = null
+    private var deepSeekChatGeneration = 0L
     private val tunnel = SshTunnelManager(application, profileRepository, vault)
     private val updateManager = GitHubUpdateManager(application)
     private var api: BridgeApi? = null
@@ -126,6 +134,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var deepSeekConfigured by mutableStateOf(false)
         private set
+    val deepSeekConversations = mutableStateListOf<DeepSeekConversation>()
+    var activeDeepSeekChatId by mutableStateOf<String?>(null)
+        private set
+    var deepSeekChatSending by mutableStateOf(false)
+        private set
+    var deepSeekStreamingText by mutableStateOf("")
+        private set
+    val activeDeepSeekConversation: DeepSeekConversation?
+        get() = deepSeekConversations.firstOrNull { it.id == activeDeepSeekChatId }
     var gpuSnapshot by mutableStateOf<GpuSnapshot?>(null)
         private set
     var gpuBusy by mutableStateOf(false)
@@ -373,6 +390,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        deepSeekChatGeneration += 1
+        deepSeekChatJob?.cancel()
+        deepSeekChatJob = null
+        deepSeekChatSending = false
+        deepSeekStreamingText = ""
+        deepSeekConversations.clear()
+        activeDeepSeekChatId = null
         connectionGeneration += 1
         reconnectJob?.cancel()
         reconnectJob = null
@@ -432,6 +456,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         profileRepository.delete(profile.id)
         vault.delete(profile.id)
         vault.deleteSecret(deepSeekSecretName(profile.id))
+        deepSeekChatsRepository.delete(profile.id)
         profiles.removeAll { it.id == profile.id }
     }
 
@@ -997,6 +1022,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeDeepSeekApiKey() {
         val profile = activeProfile ?: return
+        stopDeepSeekAnswer()
         vault.deleteSecret(deepSeekSecretName(profile.id))
         deepSeekConfigured = false
         deepSeekBalance = null
@@ -1058,6 +1084,107 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 remoteFilesBusy = false
             }
         }
+    }
+
+    fun newDeepSeekConversation() {
+        if (deepSeekChatSending) return
+        val profile = activeProfile ?: return
+        val chat = DeepSeekChatRepository.newConversation()
+        deepSeekConversations.add(0, chat)
+        activeDeepSeekChatId = chat.id
+        deepSeekChatsRepository.save(profile.id, deepSeekConversations)
+    }
+
+    fun selectDeepSeekConversation(id: String) {
+        if (!deepSeekChatSending && deepSeekConversations.any { it.id == id }) activeDeepSeekChatId = id
+    }
+
+    fun deleteDeepSeekConversation(id: String) {
+        if (deepSeekChatSending) return
+        val profile = activeProfile ?: return
+        deepSeekConversations.removeAll { it.id == id }
+        if (activeDeepSeekChatId == id) activeDeepSeekChatId = deepSeekConversations.firstOrNull()?.id
+        deepSeekChatsRepository.save(profile.id, deepSeekConversations)
+    }
+
+    fun sendDeepSeekMessage(text: String) {
+        if (deepSeekChatSending) return
+        val cleaned = text.trim()
+        if (cleaned.isEmpty()) return
+        if (!deepSeekConfigured) {
+            errorMessage = "请先在服务器页设置 DeepSeek API Key"
+            return
+        }
+        val profile = activeProfile ?: return
+        if (activeDeepSeekConversation == null) newDeepSeekConversation()
+        val chat = activeDeepSeekConversation ?: return
+        val updated = chat.copy(
+            title = if (chat.messages.isEmpty()) cleaned.take(28) else chat.title,
+            messages = chat.messages + DeepSeekMessage("user", cleaned),
+        )
+        replaceDeepSeekConversation(updated)
+        deepSeekChatsRepository.save(profile.id, deepSeekConversations)
+        requestDeepSeekAnswer(profile.id, updated)
+    }
+
+    fun retryDeepSeekAnswer() {
+        if (deepSeekChatSending || !deepSeekConfigured) return
+        val profile = activeProfile ?: return
+        val chat = activeDeepSeekConversation ?: return
+        if (chat.messages.lastOrNull()?.role == "user") requestDeepSeekAnswer(profile.id, chat)
+    }
+
+    fun stopDeepSeekAnswer() {
+        deepSeekChatGeneration += 1
+        deepSeekChatJob?.cancel()
+        deepSeekChatJob = null
+        deepSeekChatSending = false
+        deepSeekStreamingText = ""
+    }
+
+    private fun requestDeepSeekAnswer(profileId: String, chat: DeepSeekConversation) {
+        val key = vault.loadSecret(deepSeekSecretName(profileId)) ?: run {
+            errorMessage = "请先在服务器页设置 DeepSeek API Key"
+            return
+        }
+        deepSeekChatSending = true
+        deepSeekStreamingText = ""
+        val generation = ++deepSeekChatGeneration
+        deepSeekChatJob = viewModelScope.launch {
+            val answer = StringBuilder()
+            try {
+                deepSeekChatClient.stream(key, chat.messages) { delta ->
+                    withContext(Dispatchers.Main) {
+                        if (generation == deepSeekChatGeneration && activeProfile?.id == profileId && activeDeepSeekChatId == chat.id) {
+                            answer.append(delta)
+                            deepSeekStreamingText = answer.toString()
+                        }
+                    }
+                }
+                if (generation == deepSeekChatGeneration && activeProfile?.id == profileId && activeDeepSeekChatId == chat.id) {
+                    val completed = answer.toString()
+                    if (completed.isBlank()) throw IllegalStateException("DeepSeek 返回了空回答，请重试")
+                    replaceDeepSeekConversation(chat.copy(messages = chat.messages + DeepSeekMessage("assistant", completed)))
+                    deepSeekChatsRepository.save(profileId, deepSeekConversations)
+                }
+            } catch (error: Throwable) {
+                if (error !is CancellationException && generation == deepSeekChatGeneration && activeProfile?.id == profileId) {
+                    errorMessage = error.userMessage()
+                }
+            } finally {
+                key.fill(0)
+                if (generation == deepSeekChatGeneration) {
+                    deepSeekStreamingText = ""
+                    deepSeekChatSending = false
+                    deepSeekChatJob = null
+                }
+            }
+        }
+    }
+
+    private fun replaceDeepSeekConversation(chat: DeepSeekConversation) {
+        val index = deepSeekConversations.indexOfFirst { it.id == chat.id }
+        if (index >= 0) deepSeekConversations[index] = chat
     }
 
     fun suggestRemotePath(path: String) {
@@ -1461,8 +1588,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshDeepSeekConfiguration(profile: ServerProfile) {
+        deepSeekChatGeneration += 1
+        deepSeekChatJob?.cancel()
+        deepSeekChatJob = null
+        deepSeekChatSending = false
+        deepSeekStreamingText = ""
         deepSeekConfigured = vault.loadSecret(deepSeekSecretName(profile.id))?.also { it.fill(0) } != null
         deepSeekBalance = null
+        deepSeekConversations.clear()
+        deepSeekConversations.addAll(deepSeekChatsRepository.load(profile.id))
+        activeDeepSeekChatId = deepSeekConversations.firstOrNull()?.id
     }
 
     private fun deepSeekSecretName(profileId: String) = "deepseek_$profileId"
@@ -1487,6 +1622,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        deepSeekChatJob?.cancel()
         connectionGeneration += 1
         reconnectJob?.cancel()
         connectionHealthJob?.cancel()
