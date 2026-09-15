@@ -28,6 +28,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Test server bridge
         run: python3 -m unittest discover -s server/tests -v
