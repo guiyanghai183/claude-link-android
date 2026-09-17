@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "新增研记语音来电：用受限配对码连接研记，接收高优先级来电通知，接听后由手机朗读确认问题；测试来电可直接反馈声音是否清楚。填写百炼 Realtime 配置后可进行实时语音问答。首次启用请允许通知权限，实时通话另需麦克风权限。" \
+            --arg releaseNotes "修复鸿蒙卓易通环境无法使用手机语音引擎的问题：接听后播放研记服务器经百炼合成的问题语音。来电增加铃声和振动，通知上的接听按钮可直接接通；服务器页增加锁屏全屏来电权限入口。实时问答在问题播放后自动开始收音。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

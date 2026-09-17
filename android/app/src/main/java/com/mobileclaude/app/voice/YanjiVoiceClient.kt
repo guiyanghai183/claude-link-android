@@ -98,6 +98,11 @@ class YanjiVoiceClient(private val url: String, private val token: String) {
     fun pending(): YanjiCall? = request("/api/voice/device/pending").optJSONObject("call")?.let(YanjiCall::fromJson)
     fun status(id: String): YanjiCall = YanjiCall.fromJson(request("/api/voice/device/calls/$id/status"))
     fun answer(id: String): YanjiCall = YanjiCall.fromJson(request("/api/voice/device/calls/$id/answer", "POST", JSONObject()))
+    fun prompt(id: String): ByteArray {
+        val result = request("/api/voice/device/calls/$id/prompt")
+        require(result.getInt("sampleRate") == 24_000) { "问题语音采样率不支持" }
+        return Base64.decode(result.getString("pcm"), Base64.DEFAULT)
+    }
     fun decline(id: String): YanjiCall = YanjiCall.fromJson(request("/api/voice/device/calls/$id/decline", "POST", JSONObject()))
     fun finish(id: String): YanjiCall = YanjiCall.fromJson(request("/api/voice/device/calls/$id/finish", "POST", JSONObject()))
     fun reply(id: String, text: String): YanjiCall = YanjiCall.fromJson(request("/api/voice/device/calls/$id/reply", "POST", JSONObject().put("text", text)))

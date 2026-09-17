@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.IBinder
 import com.mobileclaude.app.MainActivity
@@ -35,6 +37,9 @@ class YanjiVoiceService : Service() {
         manager.createNotificationChannel(NotificationChannel(STATUS_CHANNEL, "研记来电监听", NotificationManager.IMPORTANCE_LOW))
         manager.createNotificationChannel(NotificationChannel(CALL_CHANNEL, "研记来电", NotificationManager.IMPORTANCE_HIGH).apply {
             enableVibration(true)
+            vibrationPattern = longArrayOf(0, 500, 350, 500)
+            setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE), AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build())
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         })
         val notification = statusNotification("等待研记语音确认")
@@ -119,6 +124,10 @@ class YanjiVoiceService : Service() {
         val open = PendingIntent.getActivity(this, 20, Intent(this, YanjiCallActivity::class.java)
             .putExtra(EXTRA_CALL_ID, call.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val answer = PendingIntent.getActivity(this, 22, Intent(this, YanjiCallActivity::class.java)
+            .putExtra(EXTRA_CALL_ID, call.id).putExtra(EXTRA_AUTO_ANSWER, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val decline = PendingIntent.getService(this, 21, Intent(this, YanjiVoiceService::class.java)
             .setAction(ACTION_DECLINE).putExtra(EXTRA_CALL_ID, call.id),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -134,12 +143,12 @@ class YanjiVoiceService : Service() {
             .setOngoing(true)
         if (Build.VERSION.SDK_INT >= 31) {
             builder.setStyle(Notification.CallStyle.forIncomingCall(
-                android.app.Person.Builder().setName("ChatGPT · 研记").build(), decline, open))
+                android.app.Person.Builder().setName("ChatGPT · 研记").build(), decline, answer))
         } else {
             builder.addAction(Notification.Action.Builder(null, "拒接", decline).build())
-            builder.addAction(Notification.Action.Builder(null, "接听", open).build())
+            builder.addAction(Notification.Action.Builder(null, "接听", answer).build())
         }
-        return builder.build()
+        return builder.build().apply { flags = flags or Notification.FLAG_INSISTENT }
     }
 
     override fun onDestroy() {
@@ -151,10 +160,11 @@ class YanjiVoiceService : Service() {
 
     companion object {
         const val EXTRA_CALL_ID = "yanji_call_id"
+        const val EXTRA_AUTO_ANSWER = "yanji_auto_answer"
         private const val ACTION_STOP = "com.mobileclaude.app.voice.STOP"
         private const val ACTION_DECLINE = "com.mobileclaude.app.voice.DECLINE"
         private const val STATUS_CHANNEL = "yanji_voice_status"
-        private const val CALL_CHANNEL = "yanji_voice_incoming"
+        private const val CALL_CHANNEL = "yanji_voice_incoming_v2"
         private const val STATUS_NOTIFICATION = 1801
         private const val CALL_NOTIFICATION = 1802
 
@@ -163,6 +173,9 @@ class YanjiVoiceService : Service() {
         }
         fun stop(context: Context) {
             context.startService(Intent(context, YanjiVoiceService::class.java).setAction(ACTION_STOP))
+        }
+        fun dismissCall(context: Context) {
+            context.getSystemService(NotificationManager::class.java).cancel(CALL_NOTIFICATION)
         }
     }
 }

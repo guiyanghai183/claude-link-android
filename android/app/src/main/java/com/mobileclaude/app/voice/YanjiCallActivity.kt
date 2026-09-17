@@ -1,14 +1,15 @@
 package com.mobileclaude.app.voice
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.MediaPlayer
 import android.os.Bundle
-import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -41,7 +42,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
+import java.io.File
 
 class YanjiCallActivity : ComponentActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -49,11 +50,12 @@ class YanjiCallActivity : ComponentActivity() {
     private var busy by mutableStateOf(false)
     private var message by mutableStateOf("")
     private var heard by mutableStateOf(false)
+    private var promptBusy by mutableStateOf(false)
     private var lastTranscript by mutableStateOf("")
     private var callId = ""
     private lateinit var api: YanjiVoiceClient
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
+    private var promptPlayer: MediaPlayer? = null
+    private var promptFile: File? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var sender: Job? = null
@@ -74,16 +76,9 @@ class YanjiCallActivity : ComponentActivity() {
         val config = YanjiVoiceConfig(this)
         if (callId.isBlank() || !config.enabled) { finish(); return }
         api = YanjiVoiceClient(config.url, config.token())
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.SIMPLIFIED_CHINESE
-                ttsReady = true
-                if (call?.state == "connected") speakQuestion()
-            } else message = "手机语音引擎不可用，请阅读屏幕上的问题"
-        }
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { api.status(callId) } }
-                .onSuccess { call = it }
+                .onSuccess { call = it; maybeAutoAnswer(intent) }
                 .onFailure { message = it.message ?: "读取来电失败" }
         }
         setContent {
@@ -120,10 +115,10 @@ class YanjiCallActivity : ComponentActivity() {
                                 Spacer(Modifier.height(10.dp))
                                 OutlinedButton(onClick = { reply("已接到来电，但声音不清楚") }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("已接到，声音不清楚") }
                                 Spacer(Modifier.height(10.dp))
-                                OutlinedButton(onClick = { speakQuestion() },
+                                OutlinedButton(onClick = { playQuestion() }, enabled = !promptBusy,
                                     modifier = Modifier.fillMaxWidth()) { Text("再听一遍问题") }
                             } else if (!heard) {
-                                Button(onClick = { startAudio() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("开始说话") }
+                                Button(onClick = { startAudio() }, enabled = !busy && !promptBusy, modifier = Modifier.fillMaxWidth()) { Text("开始说话") }
                             } else {
                                 Text("正在传输语音，可直接说话", color = MaterialTheme.colorScheme.primary)
                             }
@@ -139,6 +134,16 @@ class YanjiCallActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        maybeAutoAnswer(intent)
+    }
+
+    private fun maybeAutoAnswer(source: Intent) {
+        if (source.getBooleanExtra(YanjiVoiceService.EXTRA_AUTO_ANSWER, false) && call?.state == "ringing" && !busy) requestAnswer()
+    }
+
     private fun requestAnswer() {
         if (call?.mode != "test" && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
@@ -151,17 +156,66 @@ class YanjiCallActivity : ComponentActivity() {
             runCatching { withContext(Dispatchers.IO) { api.answer(callId) } }
                 .onSuccess {
                     call = it
-                    speakQuestion()
-                    message = if (it.mode == "test") "听完问题后请选择声音是否清楚" else "听完问题后点击开始说话"
+                    YanjiVoiceService.dismissCall(this@YanjiCallActivity)
+                    playQuestion()
                 }
                 .onFailure { message = it.message ?: "接听失败" }
             busy = false
         }
     }
 
-    private fun speakQuestion() {
-        val question = call?.question ?: return
-        if (ttsReady) tts?.speak(question, TextToSpeech.QUEUE_FLUSH, null, "yanji-question")
+    private fun playQuestion() {
+        val current = call ?: return
+        if (current.state != "connected" || promptBusy) return
+        promptBusy = true
+        message = "正在准备语音…"
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) {
+                val audio = api.prompt(callId)
+                File.createTempFile("yanji-prompt-", ".wav", cacheDir).apply {
+                    try { writeBytes(YanjiPromptAudio.wav(audio)) } catch (error: Exception) { delete(); throw error }
+                }
+            } }
+                .onSuccess { playPromptFile(it) }
+                .onFailure { promptBusy = false; message = it.message ?: "无法获取语音，请阅读屏幕上的问题" }
+        }
+    }
+
+    private fun playPromptFile(file: File) {
+        stopPrompt()
+        promptBusy = true
+        promptFile = file
+        try {
+            val player = MediaPlayer()
+            promptPlayer = player
+            player.setAudioAttributes(AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            player.setOnPreparedListener { message = ""; it.start() }
+            player.setOnCompletionListener {
+                stopPrompt()
+                if (call?.mode == "realtime" && call?.state == "connected" && !heard) startAudio()
+                else if (call?.mode == "test") message = "听完问题后请选择声音是否清楚"
+            }
+            player.setOnErrorListener { _, _, _ ->
+                stopPrompt()
+                message = "语音播放失败，请检查网络和媒体音量"
+                true
+            }
+            player.setDataSource(file.absolutePath)
+            player.prepareAsync()
+        } catch (error: Exception) {
+            stopPrompt()
+            message = error.message ?: "语音播放失败"
+        }
+    }
+
+    private fun stopPrompt() {
+        runCatching { promptPlayer?.release() }
+        promptPlayer = null
+        promptFile?.delete()
+        promptFile = null
+        promptBusy = false
     }
 
     private fun startAudio() {
@@ -250,7 +304,7 @@ class YanjiCallActivity : ComponentActivity() {
         busy = true
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { api.reply(callId, text) } }
-                .onSuccess { call = it; finished = true; tts?.stop() }
+                .onSuccess { call = it; finished = true; stopPrompt() }
                 .onFailure { message = it.message ?: "提交回答失败" }
             busy = false
         }
@@ -260,7 +314,7 @@ class YanjiCallActivity : ComponentActivity() {
         busy = true
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { api.decline(callId) } }
-                .onSuccess { call = it; finished = true }
+                .onSuccess { call = it; finished = true; YanjiVoiceService.dismissCall(this@YanjiCallActivity) }
                 .onFailure { message = it.message ?: "拒接失败" }
             busy = false
         }
@@ -268,7 +322,7 @@ class YanjiCallActivity : ComponentActivity() {
 
     private fun hangUp() {
         stopAudio()
-        tts?.stop()
+        stopPrompt()
         busy = true
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { api.finish(callId) } }
@@ -280,7 +334,7 @@ class YanjiCallActivity : ComponentActivity() {
 
     override fun onDestroy() {
         stopAudio()
-        tts?.shutdown()
+        stopPrompt()
         if (!finished && call?.state == "connected") CoroutineScope(Dispatchers.IO).launch { runCatching { api.finish(callId) } }
         scope.cancel()
         super.onDestroy()

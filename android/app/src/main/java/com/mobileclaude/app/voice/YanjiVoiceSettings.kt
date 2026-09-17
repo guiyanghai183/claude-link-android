@@ -1,7 +1,11 @@
 package com.mobileclaude.app.voice
 
 import android.Manifest
+import android.app.NotificationManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -41,6 +45,10 @@ fun YanjiVoiceSettings() {
     var enabled by remember { mutableStateOf(config.enabled) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf(if (enabled) "已开启来电监听" else "尚未配对") }
+    var fullScreenAllowed by remember { mutableStateOf(Build.VERSION.SDK_INT < 34 || context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()) }
+    val fullScreenSettings = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        fullScreenAllowed = Build.VERSION.SDK_INT < 34 || context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+    }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) status = "已配对，但需要通知权限才能显示来电"
     }
@@ -94,6 +102,27 @@ fun YanjiVoiceSettings() {
             ) { Text(if (enabled) "重新配对" else "配对并开启来电") }
             if (enabled) {
                 Spacer(Modifier.height(1.dp))
+                if (!fullScreenAllowed) {
+                    Text("锁屏全屏来电权限尚未开启。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                fullScreenSettings.launch(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                    Uri.parse("package:${context.packageName}")))
+                            }.onFailure { status = "卓易通未提供全屏来电设置入口，请检查系统通知设置" }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("开启锁屏全屏来电") }
+                }
+                OutlinedButton(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+                        }.onFailure { status = "卓易通未提供通知设置入口" }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("检查来电铃声和通知") }
                 OutlinedButton(
                     onClick = {
                         config.clear()
@@ -105,7 +134,7 @@ fun YanjiVoiceSettings() {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("关闭来电监听") }
             }
-            Text("来电通知需要系统通知权限；锁屏全屏显示受手机设置控制。", style = MaterialTheme.typography.bodySmall,
+            Text("响铃和振动由系统来电通知控制；解锁使用手机时，系统通常先显示带接听按钮的来电横幅。", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
