@@ -27,6 +27,7 @@ class YanjiVoiceService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val manager by lazy { getSystemService(NotificationManager::class.java) }
     private var polling: Job? = null
+    private var alertTimeout: Job? = null
     private var notifiedId: String? = null
     private var lastError = ""
 
@@ -52,19 +53,23 @@ class YanjiVoiceService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 YanjiVoiceConfig(this).clear()
+                stopCallAlerts()
                 manager.cancel(CALL_NOTIFICATION)
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_DECLINE -> {
                 val id = intent.getStringExtra(EXTRA_CALL_ID)
+                if (notifiedId == id) {
+                    manager.cancel(CALL_NOTIFICATION)
+                    stopCallAlerts()
+                }
                 if (id != null) scope.launch {
                     runCatching { client()?.decline(id) }
                     if (notifiedId == id) {
                         notifiedId = null
                         manager.cancel(CALL_NOTIFICATION)
-                        YanjiCallVibration.stop(this@YanjiVoiceService)
-                        YanjiCallRingtone.stop()
+                        stopCallAlerts()
                     }
                 }
             }
@@ -91,13 +96,21 @@ class YanjiVoiceService : Service() {
                 if (call != null && call.id != notifiedId) {
                     notifiedId = call.id
                     runCatching { manager.notify(CALL_NOTIFICATION, incomingNotification(call)) }
+                    alertTimeout?.cancel()
                     YanjiCallVibration.start(this@YanjiVoiceService)
                     YanjiCallRingtone.start(this@YanjiVoiceService)
+                    val alertId = call.id
+                    alertTimeout = scope.launch {
+                        delay(5 * 60_000L)
+                        if (notifiedId == alertId) {
+                            manager.cancel(CALL_NOTIFICATION)
+                            stopCallAlerts()
+                        }
+                    }
                 } else if (call == null && notifiedId != null) {
                     notifiedId = null
                     manager.cancel(CALL_NOTIFICATION)
-                    YanjiCallVibration.stop(this@YanjiVoiceService)
-                    YanjiCallRingtone.stop()
+                    stopCallAlerts()
                 }
                 if (call != null) YanjiCallRingtone.keepPlaying()
                 if (lastError.isNotEmpty()) {
@@ -113,6 +126,13 @@ class YanjiVoiceService : Service() {
             }
             delay(5_000)
         }
+    }
+
+    private fun stopCallAlerts() {
+        alertTimeout?.cancel()
+        alertTimeout = null
+        YanjiCallVibration.stop(this)
+        YanjiCallRingtone.stop()
     }
 
     private fun statusNotification(message: String): Notification {
@@ -147,6 +167,7 @@ class YanjiVoiceService : Service() {
             .setCategory(Notification.CATEGORY_CALL)
             .setPriority(Notification.PRIORITY_MAX)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setTimeoutAfter(5 * 60_000L)
             .setOngoing(true)
         if (Build.VERSION.SDK_INT >= 31) {
             builder.setStyle(Notification.CallStyle.forIncomingCall(
@@ -161,8 +182,7 @@ class YanjiVoiceService : Service() {
     override fun onDestroy() {
         polling?.cancel()
         scope.cancel()
-        YanjiCallVibration.stop(this)
-        YanjiCallRingtone.stop()
+        stopCallAlerts()
         manager.cancel(CALL_NOTIFICATION)
         super.onDestroy()
     }

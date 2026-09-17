@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "研记来电增加主动铃声与震动，持续到接听或拒接；在设置页可分别测试铃声、震动，并检查来电通知渠道。遵循手机静音、通知与免打扰设置。" \
+            --arg releaseNotes "研记来电改用应用内置铃声，避免依赖安卓环境的系统铃声文件。新增普通通知声振测试、来电与媒体通道对比、震动设备诊断和一键复制结果；仅凭播放器状态不宣称手机已出声。兼容媒体模式仅用于手动测试。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

@@ -3,10 +3,12 @@ package com.mobileclaude.app.voice
 import android.Manifest
 import android.app.NotificationManager
 import android.content.Intent
-import android.media.AudioManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.view.HapticFeedbackConstants
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -22,13 +25,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -46,13 +52,12 @@ fun YanjiVoiceSettings() {
     var enabled by remember { mutableStateOf(config.enabled) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf(if (enabled) "已开启来电监听" else "尚未配对") }
-    var vibrationStatus by remember { mutableStateOf("") }
     var fullScreenAllowed by remember { mutableStateOf(Build.VERSION.SDK_INT < 34 || context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()) }
     val fullScreenSettings = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         fullScreenAllowed = Build.VERSION.SDK_INT < 34 || context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
     }
     val channelSettings = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        vibrationStatus = "已返回来电通知设置，请用上方按钮测试。"
+        status = "已返回来电通知设置，可以进行提醒测试。"
     }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) status = "已配对，但需要通知权限才能显示来电"
@@ -107,46 +112,14 @@ fun YanjiVoiceSettings() {
             ) { Text(if (enabled) "重新配对" else "配对并开启来电") }
             if (enabled) {
                 Spacer(Modifier.height(1.dp))
-                val callChannel = context.getSystemService(NotificationManager::class.java)
-                    .getNotificationChannel(YanjiVoiceService.CALL_CHANNEL)
-                Text(
-                    when {
-                        callChannel == null -> "来电通知渠道尚未创建，请重新打开来电监听。"
-                        !callChannel.shouldVibrate() -> "系统已关闭「研记来电」通知的震动。"
-                        !YanjiCallVibration.channelAllowsVibration(context) -> "当前通知或免打扰设置阻止来电震动。"
-                        else -> "已请求来电震动；卓易通是否传递到手机，请用下方按钮测试。"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (vibrationStatus.isNotBlank()) Text(vibrationStatus, style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(onClick = {
-                    vibrationStatus = if (YanjiCallVibration.testOnce(context))
-                        "已请求手机震动一次，请以手机实际反馈为准。"
-                    else "当前安卓环境没有提供可用的震动设备。"
-                }, modifier = Modifier.fillMaxWidth()) { Text("测试手机震动") }
-                Text(
-                    when {
-                        callChannel?.sound == null -> "「研记来电」通知渠道没有设置铃声。"
-                        context.getSystemService(AudioManager::class.java).ringerMode != AudioManager.RINGER_MODE_NORMAL ->
-                            "手机当前为静音或仅震动模式，来电铃声不会响起。"
-                        else -> "来电时会持续请求播放手机的来电铃声，接听或拒接后停止。"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedButton(onClick = {
-                    vibrationStatus = if (YanjiCallRingtone.testOnce(context))
-                        "已请求播放三秒来电铃声，请以手机实际声音为准。"
-                    else "无法播放来电铃声：请检查声音模式、免打扰和来电通知设置。"
-                }, modifier = Modifier.fillMaxWidth()) { Text("测试来电铃声") }
+                YanjiAlertDiagnostics()
                 OutlinedButton(onClick = {
                     runCatching {
                         channelSettings.launch(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
                             .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                             .putExtra(Settings.EXTRA_CHANNEL_ID, YanjiVoiceService.CALL_CHANNEL))
                     }.onFailure { status = "卓易通未提供来电通知渠道设置入口" }
-                }, modifier = Modifier.fillMaxWidth()) { Text("设置研记来电震动") }
+                }, modifier = Modifier.fillMaxWidth()) { Text("打开安卓来电通知设置") }
                 if (!fullScreenAllowed) {
                     Text("锁屏全屏来电权限尚未开启。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                     OutlinedButton(
@@ -179,8 +152,52 @@ fun YanjiVoiceSettings() {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("关闭来电监听") }
             }
-            Text("来电铃声和震动由来电监听主动请求；解锁使用手机时，系统通常先显示带接听按钮的来电横幅。", style = MaterialTheme.typography.bodySmall,
+            Text("卓易通内还需开启本应用的通知铃声、振动和横幅通知。兼容播放测试使用媒体音量，测试结果以手机实际反馈为准。", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+@Composable
+private fun YanjiAlertDiagnostics() {
+    val context = LocalContext.current
+    val view = LocalView.current
+    var log by rememberSaveable { mutableStateOf("") }
+    var latest by rememberSaveable { mutableStateOf("") }
+    var details by rememberSaveable { mutableStateOf(false) }
+    var snapshot by remember { mutableStateOf(YanjiVoiceDiagnostics.snapshot(context)) }
+    fun report(value: String) {
+        latest = value
+        log = (log + "\n" + value).takeLast(12_000)
+        snapshot = YanjiVoiceDiagnostics.snapshot(context)
+    }
+    DisposableEffect(Unit) { onDispose { YanjiCallRingtone.stopTest() } }
+
+    Text("来电兼容性检查", fontWeight = FontWeight.Bold)
+    Text("通知测试会在三秒后发送普通提醒。下面两项铃声使用同一段内置音频，可对比来电与媒体播放是否有声。",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    OutlinedButton(onClick = { YanjiVoiceDiagnostics.scheduleNotification(context, ::report) },
+        modifier = Modifier.fillMaxWidth()) { Text("测试普通通知（声音与震动）") }
+    OutlinedButton(onClick = { YanjiCallRingtone.test(context, false, ::report) },
+        modifier = Modifier.fillMaxWidth()) { Text("测试内置来电铃声") }
+    OutlinedButton(onClick = { YanjiCallRingtone.test(context, true, ::report) },
+        modifier = Modifier.fillMaxWidth()) { Text("测试兼容铃声（媒体音量）") }
+    OutlinedButton(onClick = { report(YanjiCallVibration.testWithReport(context)) },
+        modifier = Modifier.fillMaxWidth()) { Text("测试直接震动") }
+    if (latest.isNotBlank()) Text(latest, style = MaterialTheme.typography.bodySmall)
+    OutlinedButton(onClick = { details = !details; snapshot = YanjiVoiceDiagnostics.snapshot(context) },
+        modifier = Modifier.fillMaxWidth()) { Text(if (details) "收起详细诊断" else "查看详细诊断") }
+    if (details) {
+        OutlinedButton(onClick = {
+            val result = runCatching { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
+            report(result.fold({ "按键触感请求返回 $it；是否实际震动以手机反馈为准。" },
+                { "按键触感异常：${it.javaClass.simpleName}" }))
+        }, modifier = Modifier.fillMaxWidth()) { Text("测试按键触感") }
+        SelectionContainer { Text(snapshot + "\n\n测试记录：" + log, style = MaterialTheme.typography.bodySmall) }
+    }
+    OutlinedButton(onClick = {
+        val text = YanjiVoiceDiagnostics.snapshot(context) + "\n\n测试记录：" + log
+        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("研记来电诊断", text))
+        latest = "诊断结果已复制，可粘贴给我；不包含配对码或 API 密钥。"
+    }, modifier = Modifier.fillMaxWidth()) { Text("复制诊断结果") }
 }
