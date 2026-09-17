@@ -3,6 +3,7 @@ package com.mobileclaude.app.voice
 import android.Manifest
 import android.app.NotificationManager
 import android.content.Intent
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -45,9 +46,13 @@ fun YanjiVoiceSettings() {
     var enabled by remember { mutableStateOf(config.enabled) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf(if (enabled) "已开启来电监听" else "尚未配对") }
+    var vibrationStatus by remember { mutableStateOf("") }
     var fullScreenAllowed by remember { mutableStateOf(Build.VERSION.SDK_INT < 34 || context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()) }
     val fullScreenSettings = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         fullScreenAllowed = Build.VERSION.SDK_INT < 34 || context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+    }
+    val channelSettings = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        vibrationStatus = "已返回来电通知设置，请用上方按钮测试。"
     }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) status = "已配对，但需要通知权限才能显示来电"
@@ -102,6 +107,46 @@ fun YanjiVoiceSettings() {
             ) { Text(if (enabled) "重新配对" else "配对并开启来电") }
             if (enabled) {
                 Spacer(Modifier.height(1.dp))
+                val callChannel = context.getSystemService(NotificationManager::class.java)
+                    .getNotificationChannel(YanjiVoiceService.CALL_CHANNEL)
+                Text(
+                    when {
+                        callChannel == null -> "来电通知渠道尚未创建，请重新打开来电监听。"
+                        !callChannel.shouldVibrate() -> "系统已关闭「研记来电」通知的震动。"
+                        !YanjiCallVibration.channelAllowsVibration(context) -> "当前通知或免打扰设置阻止来电震动。"
+                        else -> "已请求来电震动；卓易通是否传递到手机，请用下方按钮测试。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (vibrationStatus.isNotBlank()) Text(vibrationStatus, style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = {
+                    vibrationStatus = if (YanjiCallVibration.testOnce(context))
+                        "已请求手机震动一次，请以手机实际反馈为准。"
+                    else "当前安卓环境没有提供可用的震动设备。"
+                }, modifier = Modifier.fillMaxWidth()) { Text("测试手机震动") }
+                Text(
+                    when {
+                        callChannel?.sound == null -> "「研记来电」通知渠道没有设置铃声。"
+                        context.getSystemService(AudioManager::class.java).ringerMode != AudioManager.RINGER_MODE_NORMAL ->
+                            "手机当前为静音或仅震动模式，来电铃声不会响起。"
+                        else -> "来电时会持续请求播放手机的来电铃声，接听或拒接后停止。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = {
+                    vibrationStatus = if (YanjiCallRingtone.testOnce(context))
+                        "已请求播放三秒来电铃声，请以手机实际声音为准。"
+                    else "无法播放来电铃声：请检查声音模式、免打扰和来电通知设置。"
+                }, modifier = Modifier.fillMaxWidth()) { Text("测试来电铃声") }
+                OutlinedButton(onClick = {
+                    runCatching {
+                        channelSettings.launch(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                            .putExtra(Settings.EXTRA_CHANNEL_ID, YanjiVoiceService.CALL_CHANNEL))
+                    }.onFailure { status = "卓易通未提供来电通知渠道设置入口" }
+                }, modifier = Modifier.fillMaxWidth()) { Text("设置研记来电震动") }
                 if (!fullScreenAllowed) {
                     Text("锁屏全屏来电权限尚未开启。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                     OutlinedButton(
@@ -134,7 +179,7 @@ fun YanjiVoiceSettings() {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("关闭来电监听") }
             }
-            Text("响铃和振动由系统来电通知控制；解锁使用手机时，系统通常先显示带接听按钮的来电横幅。", style = MaterialTheme.typography.bodySmall,
+            Text("来电铃声和震动由来电监听主动请求；解锁使用手机时，系统通常先显示带接听按钮的来电横幅。", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }

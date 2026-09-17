@@ -63,6 +63,8 @@ class YanjiVoiceService : Service() {
                     if (notifiedId == id) {
                         notifiedId = null
                         manager.cancel(CALL_NOTIFICATION)
+                        YanjiCallVibration.stop(this@YanjiVoiceService)
+                        YanjiCallRingtone.stop()
                     }
                 }
             }
@@ -89,10 +91,15 @@ class YanjiVoiceService : Service() {
                 if (call != null && call.id != notifiedId) {
                     notifiedId = call.id
                     runCatching { manager.notify(CALL_NOTIFICATION, incomingNotification(call)) }
+                    YanjiCallVibration.start(this@YanjiVoiceService)
+                    YanjiCallRingtone.start(this@YanjiVoiceService)
                 } else if (call == null && notifiedId != null) {
                     notifiedId = null
                     manager.cancel(CALL_NOTIFICATION)
+                    YanjiCallVibration.stop(this@YanjiVoiceService)
+                    YanjiCallRingtone.stop()
                 }
+                if (call != null) YanjiCallRingtone.keepPlaying()
                 if (lastError.isNotEmpty()) {
                     lastError = ""
                     runCatching { manager.notify(STATUS_NOTIFICATION, statusNotification("等待研记语音确认")) }
@@ -154,6 +161,8 @@ class YanjiVoiceService : Service() {
     override fun onDestroy() {
         polling?.cancel()
         scope.cancel()
+        YanjiCallVibration.stop(this)
+        YanjiCallRingtone.stop()
         manager.cancel(CALL_NOTIFICATION)
         super.onDestroy()
     }
@@ -164,7 +173,7 @@ class YanjiVoiceService : Service() {
         private const val ACTION_STOP = "com.mobileclaude.app.voice.STOP"
         private const val ACTION_DECLINE = "com.mobileclaude.app.voice.DECLINE"
         private const val STATUS_CHANNEL = "yanji_voice_status"
-        private const val CALL_CHANNEL = "yanji_voice_incoming_v2"
+        const val CALL_CHANNEL = "yanji_voice_incoming_v2"
         private const val STATUS_NOTIFICATION = 1801
         private const val CALL_NOTIFICATION = 1802
 
@@ -176,6 +185,8 @@ class YanjiVoiceService : Service() {
         }
         fun dismissCall(context: Context) {
             context.getSystemService(NotificationManager::class.java).cancel(CALL_NOTIFICATION)
+            YanjiCallVibration.stop(context)
+            YanjiCallRingtone.stop()
         }
     }
 }

@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复鸿蒙卓易通环境无法使用手机语音引擎的问题：接听后播放研记服务器经百炼合成的问题语音。来电增加铃声和振动，通知上的接听按钮可直接接通；服务器页增加锁屏全屏来电权限入口。实时问答在问题播放后自动开始收音。" \
+            --arg releaseNotes "研记来电增加主动铃声与震动，持续到接听或拒接；在设置页可分别测试铃声、震动，并检查来电通知渠道。遵循手机静音、通知与免打扰设置。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
