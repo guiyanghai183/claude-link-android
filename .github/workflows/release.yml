@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "研记来电改用应用内置铃声，避免依赖安卓环境的系统铃声文件。新增普通通知声振测试、来电与媒体通道对比、震动设备诊断和一键复制结果；仅凭播放器状态不宣称手机已出声。兼容媒体模式仅用于手动测试。" \
+            --arg releaseNotes "按迁移安排关闭 Claude Link 的研记来电功能，移除来电入口、来电界面和后台监听；更新或打开应用时清理旧配对及提醒。研记电话改由独立的原生鸿蒙应用承接。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

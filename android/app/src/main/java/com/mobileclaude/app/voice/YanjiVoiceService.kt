@@ -198,7 +198,18 @@ class YanjiVoiceService : Service() {
         private const val CALL_NOTIFICATION = 1802
 
         fun start(context: Context) {
-            if (YanjiVoiceConfig(context).enabled) context.startForegroundService(Intent(context, YanjiVoiceService::class.java))
+            disable(context)
+        }
+        /** Yanji calls moved to the standalone HarmonyOS app. Also clears pre-upgrade pairing. */
+        fun disable(context: Context) {
+            YanjiVoiceConfig(context).clear()
+            YanjiCallRingtone.stop()
+            YanjiCallRingtone.stopTest()
+            YanjiCallVibration.stop(context)
+            context.stopService(Intent(context, YanjiVoiceService::class.java))
+            val notifications = context.getSystemService(NotificationManager::class.java)
+            notifications.cancel(CALL_NOTIFICATION)
+            notifications.cancel(STATUS_NOTIFICATION)
         }
         fun stop(context: Context) {
             context.startService(Intent(context, YanjiVoiceService::class.java).setAction(ACTION_STOP))

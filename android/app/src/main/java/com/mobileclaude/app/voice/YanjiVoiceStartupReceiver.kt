@@ -6,8 +6,8 @@ import android.content.Intent
 
 class YanjiVoiceStartupReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
-            runCatching { YanjiVoiceService.start(context) }
+        if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            runCatching { YanjiVoiceService.disable(context) }
         }
     }
 }

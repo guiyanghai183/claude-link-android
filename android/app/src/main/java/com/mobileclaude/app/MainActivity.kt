@@ -14,7 +14,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        runCatching { YanjiVoiceService.start(this) }
+        runCatching { YanjiVoiceService.disable(this) }
         enableEdgeToEdge()
         setContent {
             ClaudeLinkTheme {
