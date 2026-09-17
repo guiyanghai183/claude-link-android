@@ -7,12 +7,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.mobileclaude.app.ui.ClaudeLinkApp
 import com.mobileclaude.app.ui.ClaudeLinkTheme
+import com.mobileclaude.app.voice.YanjiVoiceService
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<AppViewModel>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        runCatching { YanjiVoiceService.start(this) }
         enableEdgeToEdge()
         setContent {
             ClaudeLinkTheme {

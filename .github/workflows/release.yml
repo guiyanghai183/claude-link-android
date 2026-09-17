@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "DeepSeek API Key 现在只需输入一次，即可在重启应用或切换服务器后自动复用；已有按服务器保存的密钥自动迁移为应用级加密密钥，并避免在输入期间保存明文界面状态。" \
+            --arg releaseNotes "新增研记语音来电：用受限配对码连接研记，接收高优先级来电通知，接听后由手机朗读确认问题；测试来电可直接反馈声音是否清楚。填写百炼 Realtime 配置后可进行实时语音问答。首次启用请允许通知权限，实时通话另需麦克风权限。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

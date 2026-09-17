@@ -131,6 +131,7 @@ import androidx.media3.ui.PlayerView
 import com.mobileclaude.app.AppViewModel
 import com.mobileclaude.app.BuildConfig
 import com.mobileclaude.app.R
+import com.mobileclaude.app.voice.YanjiVoiceSettings
 import com.mobileclaude.app.data.Artifact
 import com.mobileclaude.app.data.ChatDetail
 import com.mobileclaude.app.data.ChatMessage
@@ -403,6 +404,7 @@ private fun ServerLanding(viewModel: AppViewModel) {
             if (viewModel.activeProfile != null) {
                 item { DeepSeekBalanceCard(viewModel) }
             }
+            item { YanjiVoiceSettings() }
             item { UpdateSettingsCard(viewModel) }
             item {
                 PrivacyCard()
