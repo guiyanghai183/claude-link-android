@@ -216,17 +216,24 @@ class SshTunnelManager(
     ): SshTerminalSession {
         val tmuxName = codexTmuxName(windowId)
         return openShell(initialDirectory, columns, rows) {
-            "cd -- ${shellQuote(initialDirectory)} || { " +
+            "stty -echo; printf '\\033[2J\\033[H'; " +
+                "cd -- ${shellQuote(initialDirectory)} || { " +
                 "printf 'Codex: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
-                "command -v tmux >/dev/null 2>&1 || { " +
+                "TMUX_BIN=/usr/bin/tmux; " +
+                "[ -x \"\$TMUX_BIN\" ] || TMUX_BIN=\"\$(type -P tmux)\"; " +
+                "[ -n \"\$TMUX_BIN\" ] || { " +
                 "printf 'Codex 窗口需要服务器安装 tmux\\n' >&2; exit 127; }; " +
-                "command -v codex >/dev/null 2>&1 || { " +
+                "CODEX_BIN=\"\$(type -P codex)\"; " +
+                "[ -n \"\$CODEX_BIN\" ] || { " +
                 "printf '服务器尚未安装 Codex CLI\\n' >&2; exit 127; }; " +
                 "export TERM=xterm-256color; " +
-                "tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null || " +
-                "tmux new-session -d -s ${shellQuote(tmuxName)} -c ${shellQuote(initialDirectory)} codex; " +
-                "tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
-                "exec tmux attach-session -t ${shellQuote(tmuxName)}"
+                "run_tmux() { env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" \"\$@\"; }; " +
+                "run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null || " +
+                "run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
+                "-c ${shellQuote(initialDirectory)} \"\$CODEX_BIN\"; " +
+                "run_tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
+                "exec env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" " +
+                "attach-session -t ${shellQuote(tmuxName)}"
         }
     }
 
@@ -236,7 +243,11 @@ class SshTunnelManager(
         val tmuxName = codexTmuxName(windowId)
         exec(
             session,
-            "tmux kill-session -t ${shellQuote(tmuxName)} >/dev/null 2>&1 || true",
+            "TMUX_BIN=/usr/bin/tmux; " +
+                "[ -x \"\$TMUX_BIN\" ] || TMUX_BIN=\"\$(type -P tmux)\"; " +
+                "[ -n \"\$TMUX_BIN\" ] && " +
+                "env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" " +
+                "kill-session -t ${shellQuote(tmuxName)} >/dev/null 2>&1 || true",
         )
     }
 

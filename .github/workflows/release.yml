@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "移除 DeepSeek 对话与 API 功能，新增最多 6 个由 tmux 持久化的 Codex CLI 窗口；支持手机屏幕自适应终端、多行草稿、中文输入法组合态保护，以及 Esc、Tab、方向键、Ctrl-C、Ctrl-D 快捷键。" \
+            --arg releaseNotes "修复 74 号机 Conda 动态库冲突导致 Codex 窗口无法连接的问题；显式使用 gyhai 用户的新版 Codex CLI，并隐藏窗口启动命令回显。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
