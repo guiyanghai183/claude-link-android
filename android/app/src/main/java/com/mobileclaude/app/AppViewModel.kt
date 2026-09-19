@@ -17,10 +17,6 @@ import androidx.lifecycle.viewModelScope
 import com.mobileclaude.app.data.ChatDetail
 import com.mobileclaude.app.data.ChatSummary
 import com.mobileclaude.app.data.ConnectionStatus
-import com.mobileclaude.app.data.DeepSeekBalance
-import com.mobileclaude.app.data.DeepSeekChatRepository
-import com.mobileclaude.app.data.DeepSeekConversation
-import com.mobileclaude.app.data.DeepSeekMessage
 import com.mobileclaude.app.data.DirectoryListing
 import com.mobileclaude.app.data.GpuSnapshot
 import com.mobileclaude.app.data.MainTab
@@ -33,13 +29,13 @@ import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.WebAttachment
 import com.mobileclaude.app.data.UpdateState
 import com.mobileclaude.app.network.BridgeApi
-import com.mobileclaude.app.network.DeepSeekChatClient
 import com.mobileclaude.app.security.CredentialVault
 import com.mobileclaude.app.ssh.SshTunnelManager
 import com.mobileclaude.app.ssh.SshTerminalSession
 import com.mobileclaude.app.ssh.TunnelConnection
 import com.mobileclaude.app.ssh.ReconnectDelayPolicy
 import com.mobileclaude.app.terminal.TerminalTextBuffer
+import com.mobileclaude.app.terminal.CodexTerminalBuffer
 import com.mobileclaude.app.update.GitHubUpdateManager
 import com.mobileclaude.app.update.InstallLaunchResult
 import kotlinx.coroutines.CancellationException
@@ -63,15 +59,9 @@ import java.net.UnknownHostException
 import java.util.UUID
 
 private const val MAX_WEB_ATTACHMENT_CHARS = 300_000
-private const val GLOBAL_DEEPSEEK_SECRET = "deepseek_api_key"
-
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val profileRepository = ProfileRepository(application)
     private val vault = CredentialVault(application)
-    private val deepSeekChatsRepository = DeepSeekChatRepository(vault)
-    private val deepSeekChatClient = DeepSeekChatClient()
-    private var deepSeekChatJob: Job? = null
-    private var deepSeekChatGeneration = 0L
     private val tunnel = SshTunnelManager(application, profileRepository, vault)
     private val updateManager = GitHubUpdateManager(application)
     private var api: BridgeApi? = null
@@ -90,12 +80,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var terminalChatId: String? = null
     private var terminalCompletionMarker: String? = null
     private val terminalBuffer = TerminalTextBuffer()
+    private var codexReaderJob: Job? = null
+    private var codexSession: SshTerminalSession? = null
+    private var codexGeneration = 0L
+    private var codexColumns = CodexTerminalBuffer.DEFAULT_COLUMNS
+    private var codexRows = CodexTerminalBuffer.DEFAULT_ROWS
+    private val codexBuffer = CodexTerminalBuffer(codexColumns, codexRows)
     private val reconnectMutex = Mutex()
     private var connectionGeneration = 0L
     private var activeChatGeneration = 0L
     private var busyTaskCount = 0
     private val pendingWebAttachments = mutableStateMapOf<String, WebAttachment>()
     private val terminalDrafts = mutableStateMapOf<String, String>()
+    private val codexDrafts = mutableStateMapOf<String, String>()
     private var ocrPreviewTargetChatId: String? = null
 
     val profiles = mutableStateListOf<ServerProfile>().apply { addAll(profileRepository.load()) }
@@ -129,21 +126,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var updateState by mutableStateOf<UpdateState>(UpdateState.Idle)
         private set
-    var deepSeekBalance by mutableStateOf<DeepSeekBalance?>(null)
+    val codexWindows: List<ChatSummary>
+        get() = chats.filter { it.mode == "codex" }
+    val projectChats: List<ChatSummary>
+        get() = chats.filter { it.mode != "codex" }
+    var activeCodexWindowId by mutableStateOf<String?>(null)
         private set
-    var deepSeekBusy by mutableStateOf(false)
+    val activeCodexWindow: ChatSummary?
+        get() = codexWindows.firstOrNull { it.id == activeCodexWindowId }
+    var codexTerminalStatus by mutableStateOf<TerminalStatus>(TerminalStatus.Disconnected)
         private set
-    var deepSeekConfigured by mutableStateOf(false)
+    var codexTerminalText by mutableStateOf("")
         private set
-    val deepSeekConversations = mutableStateListOf<DeepSeekConversation>()
-    var activeDeepSeekChatId by mutableStateOf<String?>(null)
-        private set
-    var deepSeekChatSending by mutableStateOf(false)
-        private set
-    var deepSeekStreamingText by mutableStateOf("")
-        private set
-    val activeDeepSeekConversation: DeepSeekConversation?
-        get() = deepSeekConversations.firstOrNull { it.id == activeDeepSeekChatId }
     var gpuSnapshot by mutableStateOf<GpuSnapshot?>(null)
         private set
     var gpuBusy by mutableStateOf(false)
@@ -333,7 +327,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         connectionStatus = ConnectionStatus.Connected(health)
                         opened
                     }
-                    refreshDeepSeekConfiguration(profile)
                     selectedTab = MainTab.CHATS
                     refreshChatsInternal()
                     startConnectionHealthMonitor()
@@ -380,7 +373,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 profiles.clear()
                 profiles.addAll(profileRepository.load())
-                refreshDeepSeekConfiguration(connection.profile)
                 addServerVisible = false
                 selectedTab = MainTab.CHATS
                 refreshChatsInternal()
@@ -391,13 +383,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
-        deepSeekChatGeneration += 1
-        deepSeekChatJob?.cancel()
-        deepSeekChatJob = null
-        deepSeekChatSending = false
-        deepSeekStreamingText = ""
-        deepSeekConversations.clear()
-        activeDeepSeekChatId = null
         connectionGeneration += 1
         reconnectJob?.cancel()
         reconnectJob = null
@@ -412,6 +397,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pollJob = null
         stopGpuMonitoring()
         stopTerminalSession(persistOutput = false)
+        stopCodexTerminal()
         tunnel.disconnect()
         profileRepository.setLastConnectedProfileId(null)
         api = null
@@ -419,13 +405,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         activeChat = null
         pendingWebAttachments.clear()
         terminalDrafts.clear()
+        codexDrafts.clear()
         ocrPreviewTargetChatId = null
         ocrPreviewDraft = null
         chats.clear()
         artifactImages.clear()
-        deepSeekBalance = null
-        deepSeekConfigured = false
-        deepSeekBusy = false
+        activeCodexWindowId = null
         gpuSnapshot = null
         gpuError = null
         newChatFolder = null
@@ -437,9 +422,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectTab(tab: MainTab) {
         if (selectedTab == tab) return
+        val previous = selectedTab
         selectedTab = tab
+        if (previous == MainTab.CHATS && tab != MainTab.CHATS) stopTerminalSession()
+        if (previous == MainTab.CODEX && tab != MainTab.CODEX) stopCodexTerminal()
         if (tab == MainTab.CHATS) {
-            val chatId = activeChat?.chat?.id ?: return
+            val current = activeChat?.chat ?: return
+            if (current.mode == "terminal") {
+                startTerminalSession(current.id, current.projectPath)
+                return
+            }
+            val chatId = current.id
             val generation = activeChatGeneration
             viewModelScope.launch {
                 runCatching { refreshActiveChat(chatId, generation) }
@@ -449,6 +442,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             pollJob?.cancel()
             pollJob = null
         }
+        if (tab == MainTab.CODEX && activeCodexWindowId != null) reconnectCodexWindow()
         if (tab == MainTab.FILES && remoteFileListing == null) refreshRemoteFiles()
     }
 
@@ -456,8 +450,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (activeProfile?.id == profile.id) disconnect()
         profileRepository.delete(profile.id)
         vault.delete(profile.id)
-        vault.deleteSecret(deepSeekSecretName(profile.id))
-        deepSeekChatsRepository.delete(profile.id)
         profiles.removeAll { it.id == profile.id }
     }
 
@@ -482,6 +474,187 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 openChatInternal(created.id, generation)
             }
         }
+    }
+
+    fun createCodexWindow() {
+        if (codexWindows.size >= MAX_CODEX_WINDOWS) {
+            errorMessage = "Codex 窗口最多只能创建 $MAX_CODEX_WINDOWS 个"
+            return
+        }
+        val clientChatId = UUID.randomUUID().toString()
+        viewModelScope.launch {
+            runTask {
+                val home = (connectionStatus as? ConnectionStatus.Connected)?.health?.home
+                    ?: error("服务器尚未连接")
+                val created = callBridge { it.createChat(home, clientChatId, "codex") }
+                refreshChatsInternal()
+                activeCodexWindowId = created.id
+                selectedTab = MainTab.CODEX
+                startCodexTerminal(created.id, created.projectPath)
+            }
+        }
+    }
+
+    fun openCodexWindow(windowId: String) {
+        val window = codexWindows.firstOrNull { it.id == windowId } ?: return
+        activeCodexWindowId = window.id
+        selectedTab = MainTab.CODEX
+        startCodexTerminal(window.id, window.projectPath)
+    }
+
+    fun reconnectCodexWindow() {
+        val window = activeCodexWindow ?: return
+        startCodexTerminal(window.id, window.projectPath)
+    }
+
+    fun deleteCodexWindow(windowId: String) {
+        val window = codexWindows.firstOrNull { it.id == windowId } ?: return
+        viewModelScope.launch {
+            runTask {
+                if (activeCodexWindowId == window.id) stopCodexTerminal()
+                withContext(Dispatchers.IO) { tunnel.killCodexWindow(window.id) }
+                callBridge { it.deleteChat(window.id) }
+                codexDrafts.remove(window.id)
+                refreshChatsInternal()
+                if (activeCodexWindowId == window.id) {
+                    activeCodexWindowId = codexWindows.firstOrNull()?.id
+                    activeCodexWindow?.let { startCodexTerminal(it.id, it.projectPath) }
+                }
+            }
+        }
+    }
+
+    fun codexDraft(windowId: String): String = codexDrafts[windowId].orEmpty()
+
+    fun updateCodexDraft(windowId: String, value: String) {
+        codexDrafts[windowId] = value.replace("\r", "").take(MAX_CODEX_INPUT_CHARS)
+    }
+
+    fun sendCodexPrompt(text: String, onAccepted: () -> Unit = {}) {
+        val opened = codexSession?.takeIf { it.isConnected } ?: run {
+            errorMessage = "Codex 窗口尚未连接"
+            return
+        }
+        if (text.isBlank()) return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    opened.write("\u001b[200~${text.replace("\u001b", "")}\u001b[201~\r")
+                }
+                runCatching(onAccepted)
+            } catch (error: Throwable) {
+                if (error !is CancellationException) {
+                    codexTerminalStatus = TerminalStatus.Error(error.userMessage())
+                }
+            }
+        }
+    }
+
+    fun sendCodexKey(sequence: String) {
+        val opened = codexSession?.takeIf { it.isConnected } ?: return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { opened.write(sequence) }
+            } catch (error: Throwable) {
+                if (error !is CancellationException) {
+                    codexTerminalStatus = TerminalStatus.Error(error.userMessage())
+                }
+            }
+        }
+    }
+
+    fun sendCodexControl(code: Int) {
+        val opened = codexSession?.takeIf { it.isConnected } ?: return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { opened.sendControl(code) }
+            } catch (error: Throwable) {
+                if (error !is CancellationException) {
+                    codexTerminalStatus = TerminalStatus.Error(error.userMessage())
+                }
+            }
+        }
+    }
+
+    fun resizeCodexTerminal(columns: Int, rows: Int) {
+        val width = columns.coerceIn(CodexTerminalBuffer.MIN_COLUMNS, CodexTerminalBuffer.MAX_COLUMNS)
+        val height = rows.coerceIn(CodexTerminalBuffer.MIN_ROWS, CodexTerminalBuffer.MAX_ROWS)
+        if (width == codexColumns && height == codexRows) return
+        codexColumns = width
+        codexRows = height
+        codexTerminalText = codexBuffer.resize(width, height)
+        codexSession?.takeIf { it.isConnected }?.let { opened ->
+            viewModelScope.launch(Dispatchers.IO) { runCatching { opened.resize(width, height) } }
+        }
+    }
+
+    private fun startCodexTerminal(windowId: String, projectPath: String) {
+        stopTerminalSession()
+        stopCodexTerminal()
+        activeCodexWindowId = windowId
+        val generation = codexGeneration
+        codexTerminalText = codexBuffer.clear()
+        codexTerminalStatus = TerminalStatus.Connecting
+        viewModelScope.launch {
+            try {
+                val opened = withContext(Dispatchers.IO) {
+                    tunnel.openCodexTerminal(windowId, projectPath, codexColumns, codexRows)
+                }
+                if (
+                    generation != codexGeneration ||
+                    activeCodexWindowId != windowId ||
+                    selectedTab != MainTab.CODEX
+                ) {
+                    opened.close()
+                    return@launch
+                }
+                codexSession = opened
+                codexTerminalStatus = TerminalStatus.Connected
+                codexReaderJob = viewModelScope.launch(Dispatchers.IO) {
+                    val buffer = CharArray(8_192)
+                    var failure: Throwable? = null
+                    try {
+                        while (isActive) {
+                            val count = opened.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            val chunk = String(buffer, 0, count)
+                            withContext(Dispatchers.Main) {
+                                if (generation == codexGeneration) {
+                                    codexTerminalText = codexBuffer.append(chunk)
+                                }
+                            }
+                        }
+                    } catch (error: Throwable) {
+                        if (error !is CancellationException) failure = error
+                    } finally {
+                        withContext(Dispatchers.Main) {
+                            if (generation == codexGeneration) {
+                                codexSession = null
+                                codexTerminalStatus = failure?.let {
+                                    TerminalStatus.Error(it.userMessage())
+                                } ?: TerminalStatus.Disconnected
+                            }
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                if (generation == codexGeneration && error !is CancellationException) {
+                    codexTerminalStatus = TerminalStatus.Error(error.userMessage())
+                    codexSession = null
+                }
+            }
+        }
+    }
+
+    private fun stopCodexTerminal() {
+        codexGeneration += 1
+        codexReaderJob?.cancel()
+        codexReaderJob = null
+        codexSession?.close()
+        codexSession = null
+        tunnel.closeTerminal()
+        codexTerminalStatus = TerminalStatus.Disconnected
     }
 
     fun openChat(chatId: String) {
@@ -1002,54 +1175,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         activeChat?.chat?.id?.let(pendingWebAttachments::remove)
     }
 
-    fun saveDeepSeekApiKey(value: String) {
-        if (activeProfile == null) {
-            errorMessage = "请先连接服务器"
-            return
-        }
-        val secret = value.trim().toByteArray(Charsets.UTF_8)
-        if (secret.isEmpty()) {
-            errorMessage = "请输入 DeepSeek API Key"
-            return
-        }
-        try {
-            vault.saveSecret(GLOBAL_DEEPSEEK_SECRET, secret)
-            deepSeekConfigured = true
-            refreshDeepSeekBalance()
-        } finally {
-            secret.fill(0)
-        }
-    }
-
-    fun removeDeepSeekApiKey() {
-        stopDeepSeekAnswer()
-        vault.deleteSecret(GLOBAL_DEEPSEEK_SECRET)
-        // Remove legacy per-server copies too, so an explicitly removed key cannot reappear.
-        profiles.forEach { vault.deleteSecret(deepSeekSecretName(it.id)) }
-        deepSeekConfigured = false
-        deepSeekBalance = null
-    }
-
-    fun refreshDeepSeekBalance() {
-        val profile = activeProfile ?: return
-        val key = loadDeepSeekApiKey(profile.id) ?: run {
-            deepSeekConfigured = false
-            errorMessage = "请先设置 DeepSeek API Key"
-            return
-        }
-        viewModelScope.launch {
-            deepSeekBusy = true
-            try {
-                deepSeekBalance = callBridge { it.deepSeekBalance(key) }
-            } catch (error: Throwable) {
-                if (error !is CancellationException) errorMessage = error.userMessage()
-            } finally {
-                key.fill(0)
-                deepSeekBusy = false
-            }
-        }
-    }
-
     fun loadArtifact(id: String) {
         if (artifactImages.containsKey(id)) return
         viewModelScope.launch {
@@ -1086,107 +1211,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 remoteFilesBusy = false
             }
         }
-    }
-
-    fun newDeepSeekConversation() {
-        if (deepSeekChatSending) return
-        val profile = activeProfile ?: return
-        val chat = DeepSeekChatRepository.newConversation()
-        deepSeekConversations.add(0, chat)
-        activeDeepSeekChatId = chat.id
-        deepSeekChatsRepository.save(profile.id, deepSeekConversations)
-    }
-
-    fun selectDeepSeekConversation(id: String) {
-        if (!deepSeekChatSending && deepSeekConversations.any { it.id == id }) activeDeepSeekChatId = id
-    }
-
-    fun deleteDeepSeekConversation(id: String) {
-        if (deepSeekChatSending) return
-        val profile = activeProfile ?: return
-        deepSeekConversations.removeAll { it.id == id }
-        if (activeDeepSeekChatId == id) activeDeepSeekChatId = deepSeekConversations.firstOrNull()?.id
-        deepSeekChatsRepository.save(profile.id, deepSeekConversations)
-    }
-
-    fun sendDeepSeekMessage(text: String) {
-        if (deepSeekChatSending) return
-        val cleaned = text.trim()
-        if (cleaned.isEmpty()) return
-        if (!deepSeekConfigured) {
-            errorMessage = "请先在服务器页设置 DeepSeek API Key"
-            return
-        }
-        val profile = activeProfile ?: return
-        if (activeDeepSeekConversation == null) newDeepSeekConversation()
-        val chat = activeDeepSeekConversation ?: return
-        val updated = chat.copy(
-            title = if (chat.messages.isEmpty()) cleaned.take(28) else chat.title,
-            messages = chat.messages + DeepSeekMessage("user", cleaned),
-        )
-        replaceDeepSeekConversation(updated)
-        deepSeekChatsRepository.save(profile.id, deepSeekConversations)
-        requestDeepSeekAnswer(profile.id, updated)
-    }
-
-    fun retryDeepSeekAnswer() {
-        if (deepSeekChatSending || !deepSeekConfigured) return
-        val profile = activeProfile ?: return
-        val chat = activeDeepSeekConversation ?: return
-        if (chat.messages.lastOrNull()?.role == "user") requestDeepSeekAnswer(profile.id, chat)
-    }
-
-    fun stopDeepSeekAnswer() {
-        deepSeekChatGeneration += 1
-        deepSeekChatJob?.cancel()
-        deepSeekChatJob = null
-        deepSeekChatSending = false
-        deepSeekStreamingText = ""
-    }
-
-    private fun requestDeepSeekAnswer(profileId: String, chat: DeepSeekConversation) {
-        val key = loadDeepSeekApiKey(profileId) ?: run {
-            errorMessage = "请先在服务器页设置 DeepSeek API Key"
-            return
-        }
-        deepSeekChatSending = true
-        deepSeekStreamingText = ""
-        val generation = ++deepSeekChatGeneration
-        deepSeekChatJob = viewModelScope.launch {
-            val answer = StringBuilder()
-            try {
-                deepSeekChatClient.stream(key, chat.messages) { delta ->
-                    withContext(Dispatchers.Main) {
-                        if (generation == deepSeekChatGeneration && activeProfile?.id == profileId && activeDeepSeekChatId == chat.id) {
-                            answer.append(delta)
-                            deepSeekStreamingText = answer.toString()
-                        }
-                    }
-                }
-                if (generation == deepSeekChatGeneration && activeProfile?.id == profileId && activeDeepSeekChatId == chat.id) {
-                    val completed = answer.toString()
-                    if (completed.isBlank()) throw IllegalStateException("DeepSeek 返回了空回答，请重试")
-                    replaceDeepSeekConversation(chat.copy(messages = chat.messages + DeepSeekMessage("assistant", completed)))
-                    deepSeekChatsRepository.save(profileId, deepSeekConversations)
-                }
-            } catch (error: Throwable) {
-                if (error !is CancellationException && generation == deepSeekChatGeneration && activeProfile?.id == profileId) {
-                    errorMessage = error.userMessage()
-                }
-            } finally {
-                key.fill(0)
-                if (generation == deepSeekChatGeneration) {
-                    deepSeekStreamingText = ""
-                    deepSeekChatSending = false
-                    deepSeekChatJob = null
-                }
-            }
-        }
-    }
-
-    private fun replaceDeepSeekConversation(chat: DeepSeekConversation) {
-        val index = deepSeekConversations.indexOfFirst { it.id == chat.id }
-        if (index >= 0) deepSeekConversations[index] = chat
     }
 
     fun suggestRemotePath(path: String) {
@@ -1333,19 +1357,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pollJob = null
         stopGpuMonitoring()
         stopTerminalSession(persistOutput = false)
+        stopCodexTerminal()
         tunnel.disconnect()
         api = null
         activeProfile = null
         activeChat = null
         pendingWebAttachments.clear()
         terminalDrafts.clear()
+        codexDrafts.clear()
         ocrPreviewTargetChatId = null
         ocrPreviewDraft = null
         chats.clear()
         artifactImages.clear()
-        deepSeekBalance = null
-        deepSeekConfigured = false
-        deepSeekBusy = false
+        activeCodexWindowId = null
         gpuSnapshot = null
         gpuError = null
         newChatFolder = null
@@ -1574,6 +1598,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             chats.clear()
             chats.addAll(updated)
         }
+        if (selectedTab == MainTab.CODEX) {
+            val window = activeCodexWindow
+            if (window != null) startCodexTerminal(window.id, window.projectPath)
+            return
+        }
         val detail = activeChat ?: return
         val refreshed = runCatching {
             withContext(Dispatchers.IO) { bridge.getChat(detail.chat.id) }
@@ -1586,34 +1615,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             startTerminalSession(current.chat.id, current.chat.projectPath)
         } else if (current.chat.status == "running") {
             startPolling(current.chat.id, activeChatGeneration)
-        }
-    }
-
-    private fun refreshDeepSeekConfiguration(profile: ServerProfile) {
-        deepSeekChatGeneration += 1
-        deepSeekChatJob?.cancel()
-        deepSeekChatJob = null
-        deepSeekChatSending = false
-        deepSeekStreamingText = ""
-        deepSeekConfigured = loadDeepSeekApiKey(profile.id)?.also { it.fill(0) } != null
-        deepSeekBalance = null
-        deepSeekConversations.clear()
-        deepSeekConversations.addAll(deepSeekChatsRepository.load(profile.id))
-        activeDeepSeekChatId = deepSeekConversations.firstOrNull()?.id
-    }
-
-    private fun deepSeekSecretName(profileId: String) = "deepseek_$profileId"
-
-    private fun loadDeepSeekApiKey(profileId: String): ByteArray? {
-        vault.loadSecret(GLOBAL_DEEPSEEK_SECRET)?.let { return it }
-        // Upgrade an already configured installation without asking for the key again.
-        val legacy = vault.loadSecret(deepSeekSecretName(profileId)) ?: return null
-        try {
-            vault.saveSecret(GLOBAL_DEEPSEEK_SECRET, legacy)
-            return legacy
-        } catch (error: Throwable) {
-            legacy.fill(0)
-            throw error
         }
     }
 
@@ -1637,7 +1638,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        deepSeekChatJob?.cancel()
         connectionGeneration += 1
         reconnectJob?.cancel()
         connectionHealthJob?.cancel()
@@ -1650,6 +1650,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         stopGpuMonitoring()
         stopTerminalSession(persistOutput = false)
+        stopCodexTerminal()
         tunnel.disconnect()
         super.onCleared()
     }
@@ -1665,6 +1666,8 @@ private const val PATH_SUGGESTION_DEBOUNCE_MILLIS = 250L
 private const val MAX_TEXT_PREVIEW_BYTES = 300_000
 private const val MAX_IMAGE_PREVIEW_DIMENSION = 2_048
 private const val MAX_TERMINAL_COMMAND_CHARS = 16_000
+private const val MAX_CODEX_WINDOWS = 6
+private const val MAX_CODEX_INPUT_CHARS = 32_000
 private const val TERMINAL_PERSIST_INTERVAL_MILLIS = 300L
 
 private fun RemoteFileEntry.isPreviewableImage(): Boolean = mimeType.startsWith("image/") &&

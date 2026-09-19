@@ -28,8 +28,6 @@ import threading
 import time
 import traceback
 import urllib.parse
-import urllib.error
-import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -38,13 +36,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.15"
+APP_VERSION = "0.3.23"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_WEB_CONTEXT_CHARS = 300_000
 MAX_DIRECTORY_SUGGESTIONS = 12
-CHAT_MODES = {"claude", "terminal"}
+CHAT_MODES = {"claude", "terminal", "codex"}
+MAX_CODEX_WINDOWS = 6
 MAX_TERMINAL_COMMAND_CHARS = 16_000
 MAX_TERMINAL_OUTPUT_CHARS = 120_000
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
@@ -67,7 +66,6 @@ AUTO_ARTIFACT_SKIPPED_DIRS = SKIPPED_DIRS | {
     "vendor",
 }
 ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 GPU_CACHE_TTL_SECONDS = 0.8
 GPU_COMMAND_TIMEOUT_SECONDS = 3
 GPUQ_COMMAND_TIMEOUT_SECONDS = 3
@@ -428,46 +426,6 @@ def fetch_gpuq_snapshot() -> dict[str, Any]:
     }
 
 
-def fetch_deepseek_balance(api_key: str) -> dict[str, Any]:
-    """Fetch only the current balance; the bridge never persists the API key."""
-    if not api_key or len(api_key) > 512:
-        raise ValueError("请提供有效的 DeepSeek API Key")
-    request = urllib.request.Request(
-        DEEPSEEK_BALANCE_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            raw = response.read(MAX_BODY_BYTES + 1)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(4096).decode("utf-8", errors="replace")
-        raise ValueError(f"DeepSeek 余额查询失败（{exc.code}）：{detail[:300]}") from exc
-    except urllib.error.URLError as exc:
-        raise ValueError(f"无法连接 DeepSeek：{exc.reason}") from exc
-    if len(raw) > MAX_BODY_BYTES:
-        raise ValueError("DeepSeek 返回的数据过大")
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("DeepSeek 返回了无效的余额数据") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("balance_infos"), list):
-        raise ValueError("DeepSeek 返回的余额数据格式不正确")
-    return {
-        "isAvailable": bool(payload.get("is_available")),
-        "balanceInfos": [
-            {
-                "currency": str(item.get("currency") or ""),
-                "totalBalance": str(item.get("total_balance") or "0"),
-                "grantedBalance": str(item.get("granted_balance") or "0"),
-                "toppedUpBalance": str(item.get("topped_up_balance") or "0"),
-            }
-            for item in payload["balance_infos"]
-            if isinstance(item, dict)
-        ],
-    }
-
-
 def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -711,16 +669,36 @@ class Store:
             conn = self.connection()
             if conn.execute("SELECT 1 FROM chats WHERE id=?", (chat_id,)).fetchone() is not None:
                 return self.get_chat(chat_id)
+            if mode == "codex":
+                codex_rows = conn.execute(
+                    "SELECT title FROM chats WHERE mode='codex' ORDER BY created_at"
+                ).fetchall()
+                if len(codex_rows) >= MAX_CODEX_WINDOWS:
+                    raise ValueError(f"Codex 窗口最多只能创建 {MAX_CODEX_WINDOWS} 个")
+                used_numbers = {
+                    int(match.group(1))
+                    for row in codex_rows
+                    if (match := re.fullmatch(r"Codex (\d+)", str(row["title"]))) is not None
+                }
+                window_number = next(
+                    number for number in range(1, MAX_CODEX_WINDOWS + 1)
+                    if number not in used_numbers
+                )
+                if not title.strip() or title in {"新对话", "Codex"}:
+                    title = f"Codex {window_number}"
             conn.execute(
-                "INSERT INTO chats(id,title,project_path,mode,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?)",
+                "INSERT INTO chats(id,title,project_path,mode,created_at,updated_at,pinned) "
+                "VALUES(?,?,?,?,?,?,?)",
                 (
                     chat_id,
-                    title.strip()[:80] or ("新终端" if mode == "terminal" else "新对话"),
+                    title.strip()[:80] or (
+                        "新终端" if mode == "terminal" else "Codex" if mode == "codex" else "新对话"
+                    ),
                     project_path,
                     mode,
                     current,
                     current,
+                    int(mode == "codex"),
                 ),
             )
             if mode == "claude":
@@ -2429,7 +2407,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 project = self.state.validate_project(str(body.get("projectPath") or Path.home()))
                 mode = str(body.get("mode") or "claude").strip().lower()
                 if mode not in CHAT_MODES:
-                    raise ValueError("对话类型必须是 claude 或 terminal")
+                    raise ValueError("对话类型必须是 claude、terminal 或 codex")
                 raw_chat_id = str(body.get("clientChatId") or uuid.uuid4())
                 try:
                     client_chat_id = str(uuid.UUID(raw_chat_id))
@@ -2437,7 +2415,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     raise ValueError("clientChatId 必须是 UUID") from exc
                 chat = self.state.store.create_chat(
                     project,
-                    str(body.get("title") or ("新终端" if mode == "terminal" else "新对话")),
+                    str(body.get("title") or (
+                        "新终端" if mode == "terminal" else "Codex" if mode == "codex" else "新对话"
+                    )),
                     chat_id=client_chat_id,
                     mode=mode,
                 )
@@ -2497,12 +2477,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             if parts == ["v1", "maintenance", "cleanup"]:
                 self._send_json(HTTPStatus.OK, {"deleted": self.state.cleanup_expired()})
-                return
-            if parts == ["v1", "deepseek", "balance"]:
-                self._send_json(
-                    HTTPStatus.OK,
-                    fetch_deepseek_balance(str(body.get("apiKey") or "").strip()),
-                )
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "接口不存在"})
         except Exception as exc:

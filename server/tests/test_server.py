@@ -27,7 +27,6 @@ from mobile_claude_server import (  # noqa: E402
     Store,
     _fetch_process_metadata,
     extract_video_handoffs,
-    fetch_deepseek_balance,
     fetch_gpu_snapshot,
     fetch_gpuq_snapshot,
     present_image,
@@ -220,6 +219,29 @@ class ServiceStateTests(unittest.TestCase):
         self.assertEqual(self.state.store.claude_session_ids(terminal["id"]), [])
         with self.assertRaises(KeyError):
             self.state.store.active_claude_session(terminal["id"])
+
+    def test_codex_windows_are_named_pinned_and_limited_to_six(self):
+        windows = [
+            self.state.store.create_chat(str(self.project), mode="codex")
+            for _ in range(6)
+        ]
+
+        self.assertEqual([window["title"] for window in windows], [f"Codex {i}" for i in range(1, 7)])
+        self.assertTrue(all(window["mode"] == "codex" for window in windows))
+        self.assertTrue(all(window["pinned"] for window in windows))
+        self.assertTrue(all(self.state.store.claude_session_ids(window["id"]) == [] for window in windows))
+        with self.assertRaisesRegex(ValueError, "最多只能创建 6 个"):
+            self.state.store.create_chat(str(self.project), mode="codex")
+
+    def test_deleted_codex_number_is_reused(self):
+        first = self.state.store.create_chat(str(self.project), mode="codex")
+        second = self.state.store.create_chat(str(self.project), mode="codex")
+        self.assertEqual(second["title"], "Codex 2")
+
+        self.state.store.delete_chat(first["id"])
+        replacement = self.state.store.create_chat(str(self.project), mode="codex")
+
+        self.assertEqual(replacement["title"], "Codex 1")
 
     def test_terminal_command_and_output_are_idempotent_and_persisted(self):
         terminal = self.state.store.create_chat(
@@ -671,29 +693,6 @@ class ServiceStateTests(unittest.TestCase):
             self.state.claude._active_projects[project_key].chat_id, first["id"]
         )
 
-    @patch("mobile_claude_server.urllib.request.urlopen")
-    def test_deepseek_balance_is_normalized_without_persisting_the_key(self, urlopen):
-        response = urlopen.return_value.__enter__.return_value
-        response.read.return_value = json.dumps(
-            {
-                "is_available": True,
-                "balance_infos": [
-                    {
-                        "currency": "CNY",
-                        "total_balance": "12.50",
-                        "granted_balance": "2.50",
-                        "topped_up_balance": "10.00",
-                    }
-                ],
-            }
-        ).encode()
-        result = fetch_deepseek_balance("secret-test-key")
-        self.assertTrue(result["isAvailable"])
-        self.assertEqual(result["balanceInfos"][0]["totalBalance"], "12.50")
-        request = urlopen.call_args.args[0]
-        self.assertEqual(request.get_header("Authorization"), "Bearer secret-test-key")
-
-
 class GpuSnapshotTests(unittest.TestCase):
     def test_missing_nvidia_smi_is_a_non_fatal_unavailable_state(self):
         with patch("mobile_claude_server._find_nvidia_smi", return_value=None):
@@ -1036,6 +1035,35 @@ class FileApiTests(unittest.TestCase):
         )
         self.assertEqual(claude_status, 400)
         self.assertIn("终端对话", error["error"])
+
+    def test_codex_window_http_flow_enforces_six_window_limit(self):
+        project = self.home / "codex-project"
+        project.mkdir()
+        created = []
+        for _ in range(6):
+            status, window = self._post(
+                "/v1/chats",
+                {
+                    "projectPath": str(project),
+                    "clientChatId": str(uuid.uuid4()),
+                    "mode": "codex",
+                },
+            )
+            self.assertEqual(status, 201)
+            created.append(window)
+
+        self.assertEqual([window["title"] for window in created], [f"Codex {i}" for i in range(1, 7)])
+        self.assertTrue(all(window["pinned"] for window in created))
+        rejected_status, rejected = self._post(
+            "/v1/chats",
+            {
+                "projectPath": str(project),
+                "clientChatId": str(uuid.uuid4()),
+                "mode": "codex",
+            },
+        )
+        self.assertEqual(rejected_status, 400)
+        self.assertIn("最多只能创建 6 个", rejected["error"])
 
     def test_directory_suggestions_http_endpoint(self):
         project = self.home / "projects"

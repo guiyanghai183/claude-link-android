@@ -49,18 +49,6 @@ data class Artifact(
     val createdAt: String,
 )
 
-data class DeepSeekBalanceInfo(
-    val currency: String,
-    val totalBalance: String,
-    val grantedBalance: String,
-    val toppedUpBalance: String,
-)
-
-data class DeepSeekBalance(
-    val isAvailable: Boolean,
-    val balanceInfos: List<DeepSeekBalanceInfo>,
-)
-
 data class ChatDetail(
     val chat: ChatSummary,
     val messages: List<ChatMessage>,
@@ -164,7 +152,7 @@ data class GpuSnapshot(
     val queue: GpuQueueSnapshot,
 )
 
-enum class MainTab { CHATS, DEEPSEEK, FILES, GPU, SERVERS }
+enum class MainTab { CHATS, CODEX, FILES, GPU, SERVERS }
 
 sealed interface TerminalStatus {
     data object Disconnected : TerminalStatus

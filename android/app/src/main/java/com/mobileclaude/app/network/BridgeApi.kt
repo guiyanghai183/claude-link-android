@@ -5,8 +5,6 @@ import com.mobileclaude.app.data.ChatDetail
 import com.mobileclaude.app.data.ChatMessage
 import com.mobileclaude.app.data.ChatSummary
 import com.mobileclaude.app.data.DirectoryListing
-import com.mobileclaude.app.data.DeepSeekBalance
-import com.mobileclaude.app.data.DeepSeekBalanceInfo
 import com.mobileclaude.app.data.GpuInfo
 import com.mobileclaude.app.data.GpuProcessInfo
 import com.mobileclaude.app.data.GpuQueueJob
@@ -357,26 +355,6 @@ class BridgeApi(private val localPort: Int) {
                     }.orEmpty(),
                 )
             },
-        )
-    }
-
-    fun deepSeekBalance(apiKey: ByteArray): DeepSeekBalance {
-        require(apiKey.isNotEmpty()) { "请先设置 DeepSeek API Key" }
-        val json = request(
-            "POST",
-            "/v1/deepseek/balance",
-            JSONObject().put("apiKey", apiKey.toString(Charsets.UTF_8)),
-        )
-        return DeepSeekBalance(
-            isAvailable = json.optBoolean("isAvailable"),
-            balanceInfos = json.optJSONArray("balanceInfos")?.mapObjects {
-                DeepSeekBalanceInfo(
-                    currency = it.optString("currency"),
-                    totalBalance = it.optString("totalBalance", "0"),
-                    grantedBalance = it.optString("grantedBalance", "0"),
-                    toppedUpBalance = it.optString("toppedUpBalance", "0"),
-                )
-            }.orEmpty(),
         )
     }
 

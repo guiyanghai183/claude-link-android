@@ -200,6 +200,52 @@ class SshTunnelManager(
 
     @Synchronized
     fun openTerminal(initialDirectory: String, columns: Int = 100, rows: Int = 32): SshTerminalSession {
+        return openShell(initialDirectory, columns, rows) {
+            "stty -echo; cd -- ${shellQuote(initialDirectory)} || { " +
+                "printf 'Claude Link: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
+                "printf '\\033[2J\\033[H'"
+        }
+    }
+
+    @Synchronized
+    fun openCodexTerminal(
+        windowId: String,
+        initialDirectory: String,
+        columns: Int,
+        rows: Int,
+    ): SshTerminalSession {
+        val tmuxName = codexTmuxName(windowId)
+        return openShell(initialDirectory, columns, rows) {
+            "cd -- ${shellQuote(initialDirectory)} || { " +
+                "printf 'Codex: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
+                "command -v tmux >/dev/null 2>&1 || { " +
+                "printf 'Codex 窗口需要服务器安装 tmux\\n' >&2; exit 127; }; " +
+                "command -v codex >/dev/null 2>&1 || { " +
+                "printf '服务器尚未安装 Codex CLI\\n' >&2; exit 127; }; " +
+                "export TERM=xterm-256color; " +
+                "tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null || " +
+                "tmux new-session -d -s ${shellQuote(tmuxName)} -c ${shellQuote(initialDirectory)} codex; " +
+                "tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
+                "exec tmux attach-session -t ${shellQuote(tmuxName)}"
+        }
+    }
+
+    @Synchronized
+    fun killCodexWindow(windowId: String) {
+        val session = active?.session?.takeIf { it.isConnected } ?: return
+        val tmuxName = codexTmuxName(windowId)
+        exec(
+            session,
+            "tmux kill-session -t ${shellQuote(tmuxName)} >/dev/null 2>&1 || true",
+        )
+    }
+
+    private fun openShell(
+        initialDirectory: String,
+        columns: Int,
+        rows: Int,
+        startupCommand: () -> String,
+    ): SshTerminalSession {
         require(initialDirectory.startsWith('/')) { "终端目录必须是服务器绝对路径" }
         val session = active?.session?.takeIf { it.isConnected }
             ?: throw IOException("SSH 连接已断开，请先重新连接服务器")
@@ -227,11 +273,7 @@ class SshTunnelManager(
             writer = output,
         ).also {
             activeTerminal = it
-            it.write(
-                "stty -echo; cd -- ${shellQuote(initialDirectory)} || { " +
-                    "printf 'Claude Link: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
-                    "printf '\\033[2J\\033[H'\r",
-            )
+            it.write(startupCommand() + "\r")
         }
     }
 
@@ -495,6 +537,12 @@ class SshTunnelManager(
         .joinToString("") { "%02x".format(it) }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
+
+    private fun codexTmuxName(windowId: String): String {
+        val suffix = windowId.filter(Char::isLetterOrDigit).lowercase().take(24)
+        require(suffix.isNotBlank()) { "Codex 窗口标识无效" }
+        return "claude-link-codex-$suffix"
+    }
 
     companion object {
         const val REMOTE_PORT = 18_765

@@ -25,6 +25,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
@@ -109,6 +110,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -136,7 +138,6 @@ import com.mobileclaude.app.data.ChatDetail
 import com.mobileclaude.app.data.ChatMessage
 import com.mobileclaude.app.data.ChatSummary
 import com.mobileclaude.app.data.ConnectionStatus
-import com.mobileclaude.app.data.DeepSeekBalanceInfo
 import com.mobileclaude.app.data.GpuInfo
 import com.mobileclaude.app.data.GpuQueueJob
 import com.mobileclaude.app.data.GpuQueueSnapshot
@@ -150,8 +151,6 @@ import com.mobileclaude.app.data.UpdateState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
-import java.math.BigDecimal
-import java.math.RoundingMode
 import kotlin.math.roundToInt
 
 @Composable
@@ -193,7 +192,7 @@ fun ClaudeLinkApp(viewModel: AppViewModel) {
                         } else {
                             ChatScreen(viewModel, viewModel.activeChat!!)
                         }
-                        MainTab.DEEPSEEK -> DeepSeekChatScreen(viewModel)
+                        MainTab.CODEX -> CodexWindowsScreen(viewModel)
                         MainTab.FILES -> RemoteFilesScreen(viewModel)
                         MainTab.GPU -> GpuScreen(viewModel)
                         MainTab.SERVERS -> ServerLanding(viewModel)
@@ -318,7 +317,7 @@ private fun BottomTabs(selected: MainTab, onSelect: (MainTab) -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TabButton("◉", "项目", selected == MainTab.CHATS, Modifier.weight(1f)) { onSelect(MainTab.CHATS) }
-            TabButton("✦", "DeepSeek", selected == MainTab.DEEPSEEK, Modifier.weight(1f)) { onSelect(MainTab.DEEPSEEK) }
+            TabButton(">_", "Codex", selected == MainTab.CODEX, Modifier.weight(1f)) { onSelect(MainTab.CODEX) }
             TabButton("▤", "文件", selected == MainTab.FILES, Modifier.weight(1f)) { onSelect(MainTab.FILES) }
             TabButton("▥", "算力", selected == MainTab.GPU, Modifier.weight(1f)) { onSelect(MainTab.GPU) }
             TabButton("▣", "服务器", selected == MainTab.SERVERS, Modifier.weight(1f)) { onSelect(MainTab.SERVERS) }
@@ -399,9 +398,6 @@ private fun ServerLanding(viewModel: AppViewModel) {
                     onDisconnect = viewModel::disconnect,
                     onDelete = { viewModel.deleteProfile(profile) },
                 )
-            }
-            if (viewModel.activeProfile != null) {
-                item { DeepSeekBalanceCard(viewModel) }
             }
             item { UpdateSettingsCard(viewModel) }
             item {
@@ -647,148 +643,6 @@ private fun PrivacyCard() {
     }
 }
 
-@Composable
-private fun DeepSeekBalanceCard(viewModel: AppViewModel) {
-    var editing by rememberSaveable { mutableStateOf(false) }
-    var apiKey by remember { mutableStateOf("") }
-    var apiKeyVisible by rememberSaveable { mutableStateOf(false) }
-    val balance = viewModel.deepSeekBalance?.balanceInfos?.firstOrNull()
-
-    Surface(shape = RoundedCornerShape(26.dp), color = MaterialTheme.colorScheme.surface) {
-        Column(Modifier.padding(20.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(shape = CircleShape, color = Color(0xFF6E56CF).copy(alpha = 0.13f)) {
-                    Text("◌", color = Color(0xFF6E56CF), fontSize = 22.sp, modifier = Modifier.padding(9.dp))
-                }
-                Spacer(Modifier.width(11.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("DeepSeek API 余额", fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                    Text("一次设置，各服务器复用；余额查询经 SSH 临时转发", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (viewModel.deepSeekConfigured) {
-                    IconButton(onClick = viewModel::refreshDeepSeekBalance, enabled = !viewModel.deepSeekBusy) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新 DeepSeek 余额", tint = AppleBlue)
-                    }
-                }
-            }
-            if (viewModel.deepSeekConfigured && balance != null) {
-                Spacer(Modifier.height(16.dp))
-                BalanceRings(balance, viewModel.deepSeekBalance?.isAvailable == true)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "DeepSeek 公开接口目前提供实时余额，未提供按日或按模型的消耗明细；圆环显示余额构成。",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { editing = true }) { Text("更换密钥") }
-                TextButton(onClick = viewModel::removeDeepSeekApiKey) { Text("移除密钥", color = MaterialTheme.colorScheme.error) }
-            } else if (!editing) {
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    if (viewModel.deepSeekConfigured) "点击刷新以查看实时余额。" else "连接你的 DeepSeek 账户后，可在这里查看实时余额。",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp,
-                )
-                Spacer(Modifier.height(10.dp))
-                Button(
-                    onClick = {
-                        if (viewModel.deepSeekConfigured) viewModel.refreshDeepSeekBalance() else editing = true
-                    },
-                    shape = RoundedCornerShape(13.dp),
-                ) {
-                    Text(if (viewModel.deepSeekConfigured) "刷新余额" else "设置 API Key")
-                }
-            }
-            if (editing) {
-                Spacer(Modifier.height(14.dp))
-                OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    label = { Text("DeepSeek API Key") },
-                    singleLine = true,
-                    visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        TextButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
-                            Text(if (apiKeyVisible) "隐藏" else "显示", fontSize = 11.sp)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TextButton(onClick = { editing = false; apiKey = "" }) { Text("取消") }
-                    Button(
-                        onClick = {
-                            viewModel.saveDeepSeekApiKey(apiKey)
-                            apiKey = ""
-                            editing = false
-                        },
-                        enabled = apiKey.isNotBlank(),
-                        shape = RoundedCornerShape(13.dp),
-                    ) { Text("保存并查询") }
-                }
-            }
-            if (viewModel.deepSeekBusy) {
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                    Text("正在读取实时余额…", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BalanceRings(balance: DeepSeekBalanceInfo, available: Boolean) {
-    val total = balance.totalBalance.toDecimal()
-    val granted = balance.grantedBalance.toDecimal()
-    val toppedUp = balance.toppedUpBalance.toDecimal()
-    val grantedProgress = granted.ratioOf(total)
-    val toppedUpProgress = toppedUp.ratioOf(total)
-    val outerColor = if (available) AppleBlue else MaterialTheme.colorScheme.error
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(116.dp), contentAlignment = Alignment.Center) {
-            Canvas(Modifier.fillMaxSize()) {
-                val outerStroke = 12.dp.toPx()
-                val innerStroke = 10.dp.toPx()
-                drawArc(outerColor.copy(alpha = 0.14f), -90f, 360f, false, style = Stroke(outerStroke))
-                drawArc(outerColor, -90f, 360f * toppedUpProgress, false, style = Stroke(outerStroke))
-                val inset = 18.dp.toPx()
-                drawArc(Color(0xFF6E56CF).copy(alpha = 0.14f), -90f, 360f, false, topLeft = androidx.compose.ui.geometry.Offset(inset, inset), size = androidx.compose.ui.geometry.Size(size.width - inset * 2, size.height - inset * 2), style = Stroke(innerStroke))
-                drawArc(Color(0xFF6E56CF), -90f, 360f * grantedProgress, false, topLeft = androidx.compose.ui.geometry.Offset(inset, inset), size = androidx.compose.ui.geometry.Size(size.width - inset * 2, size.height - inset * 2), style = Stroke(innerStroke))
-            }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(balance.totalBalance, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                Text(balance.currency.ifBlank { "余额" }, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        Spacer(Modifier.width(16.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            BalanceLegend(outerColor, "充值余额", balance.toppedUpBalance)
-            BalanceLegend(Color(0xFF6E56CF), "赠送余额", balance.grantedBalance)
-            Text(if (available) "当前可调用 API" else "当前余额不足", fontSize = 12.sp, color = if (available) Mint else MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-@Composable
-private fun BalanceLegend(color: Color, label: String, value: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Surface(shape = CircleShape, color = color, modifier = Modifier.size(8.dp)) {}
-        Spacer(Modifier.width(7.dp))
-        Text("$label $value", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-private fun String.toDecimal(): BigDecimal = runCatching { BigDecimal(this) }.getOrDefault(BigDecimal.ZERO)
-
-private fun BigDecimal.ratioOf(total: BigDecimal): Float = if (total > BigDecimal.ZERO) {
-    divide(total, 4, RoundingMode.HALF_UP).toFloat().coerceIn(0f, 1f)
-} else {
-    0f
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -900,10 +754,10 @@ private fun ChatHistoryScreen(viewModel: AppViewModel) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item { RetentionBanner() }
-            if (viewModel.chats.isEmpty()) {
+            if (viewModel.projectChats.isEmpty()) {
                 item { EmptyChatsCard { viewModel.showFolderPicker() } }
             }
-            items(viewModel.chats, key = { it.id }) { chat ->
+            items(viewModel.projectChats, key = { it.id }) { chat ->
                 ChatHistoryRow(chat, onOpen = { viewModel.openChat(chat.id) }, onDelete = { viewModel.deleteChat(chat.id) })
             }
             item { Spacer(Modifier.height(20.dp)) }
@@ -2934,215 +2788,251 @@ private fun Float.gibText(): String {
     return "${tenths / 10}.${kotlin.math.abs(tenths % 10)}"
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DeepSeekChatScreen(viewModel: AppViewModel) {
-    var draft by rememberSaveable { mutableStateOf("") }
-    var apiKey by remember { mutableStateOf("") }
-    var showHistory by remember { mutableStateOf(false) }
-    var deleteTarget by remember { mutableStateOf<String?>(null) }
-    val chat = viewModel.activeDeepSeekConversation
-    val messages = chat?.messages.orEmpty()
-    val listState = rememberLazyListState()
-    LaunchedEffect(chat?.id, messages.size, viewModel.deepSeekStreamingText) {
-        val count = messages.size + (if (messages.isEmpty()) 1 else 0) + (if (viewModel.deepSeekChatSending) 1 else 0)
-        if (count > 0) listState.animateScrollToItem(count - 1)
-    }
+private fun CodexWindowsScreen(viewModel: AppViewModel) {
+    val windows = viewModel.codexWindows
+    val active = viewModel.activeCodexWindow
+    var deleteTarget by remember { mutableStateOf<ChatSummary?>(null) }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(
-            Modifier.fillMaxWidth()
+            Modifier
+                .fillMaxWidth()
                 .padding(WindowInsets.statusBars.asPaddingValues())
-                .padding(horizontal = 18.dp, vertical = 10.dp),
+                .padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text("DeepSeek", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Codex 窗口", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(
-                    chat?.title ?: "本机对话 · DeepSeek Flash",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontSize = 12.sp,
+                    "${windows.size} / 6 · 服务器命令行",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
                 )
             }
-            TextButton(onClick = { showHistory = true }) { Text("历史") }
-            IconButton(onClick = viewModel::newDeepSeekConversation, enabled = !viewModel.deepSeekChatSending) {
-                Icon(Icons.Default.Add, contentDescription = "新建 DeepSeek 对话", tint = AppleBlue)
+            if (active != null) {
+                IconButton(onClick = { deleteTarget = active }) {
+                    Icon(Icons.Default.Delete, contentDescription = "删除 ${active.title}")
+                }
+            }
+            IconButton(onClick = viewModel::createCodexWindow, enabled = windows.size < 6 && !viewModel.busy) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = if (windows.size < 6) "增加 Codex 窗口" else "已达到 6 个窗口上限",
+                    tint = if (windows.size < 6) AppleBlue else MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+
+        if (windows.isNotEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                windows.sortedBy { it.title }.forEach { window ->
+                    val selected = window.id == active?.id
+                    Surface(
+                        modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
+                            viewModel.openCodexWindow(window.id)
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (selected) AppleBlue else MaterialTheme.colorScheme.surface,
+                    ) {
+                        Text(
+                            window.title,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        )
+                    }
+                }
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
 
-        if (!viewModel.deepSeekConfigured) {
+        if (active == null) {
             Column(
-                Modifier.weight(1f).fillMaxWidth().padding(24.dp),
+                Modifier.weight(1f).fillMaxWidth().padding(28.dp),
                 verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("连接 DeepSeek", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("API Key 只需输入一次，之后自动记忆。对话不经过项目服务器，历史记录加密保存在手机。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(20.dp))
-                OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("DeepSeek API Key") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
+                Surface(shape = CircleShape, color = AppleBlue.copy(alpha = 0.12f)) {
+                    Text(">_", color = AppleBlue, fontFamily = FontFamily.Monospace, fontSize = 28.sp, modifier = Modifier.padding(20.dp))
+                }
+                Spacer(Modifier.height(18.dp))
+                Text(
+                    if (windows.isEmpty()) "创建第一个 Codex 窗口" else "选择一个 Codex 窗口",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
                 )
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { viewModel.saveDeepSeekApiKey(apiKey); apiKey = "" }, enabled = apiKey.isNotBlank()) {
-                    Text("保存并开始")
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "每个窗口对应服务器上的独立 Codex CLI，会在切换页面或网络短暂断开时继续保留。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                )
+                if (windows.isEmpty()) {
+                    Spacer(Modifier.height(18.dp))
+                    Button(onClick = viewModel::createCodexWindow, enabled = !viewModel.busy) {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                        Spacer(Modifier.width(7.dp))
+                        Text("增加 Codex 窗口")
+                    }
                 }
             }
         } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                if (messages.isEmpty()) {
-                    item {
-                        Column(Modifier.fillMaxWidth().padding(top = 80.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("✦", color = AppleBlue, fontSize = 36.sp)
-                            Spacer(Modifier.height(14.dp))
-                            Text("有什么想聊的？", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.height(5.dp))
-                            Text("直接提问，或开启一段新的思考。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-                items(messages) { message ->
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = if (message.role == "user") Arrangement.End else Arrangement.Start,
-                    ) {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(if (message.role == "user") 0.84f else 0.96f),
-                            shape = RoundedCornerShape(20.dp),
-                            color = if (message.role == "user") AppleBlue else MaterialTheme.colorScheme.surface,
-                            shadowElevation = if (message.role == "user") 0.dp else 1.dp,
-                        ) {
-                            SelectionContainer {
-                                Text(
-                                    message.content,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
-                                    color = if (message.role == "user") Color.White else MaterialTheme.colorScheme.onSurface,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                )
-                            }
-                        }
-                    }
-                }
-                if (viewModel.deepSeekChatSending) {
-                    item {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(0.96f),
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                        ) {
-                            if (viewModel.deepSeekStreamingText.isBlank()) {
-                                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                                    Spacer(Modifier.width(10.dp))
-                                    Text("正在思考…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            } else {
-                                SelectionContainer {
-                                    Text(viewModel.deepSeekStreamingText, Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge)
-                                }
-                            }
-                        }
-                    }
-                } else if (messages.lastOrNull()?.role == "user") {
-                    item {
-                        TextButton(onClick = viewModel::retryDeepSeekAnswer) { Text("回答中断 · 点击重试") }
-                    }
-                }
-            }
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                Surface(
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(22.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 2.dp,
-                ) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("发送消息给 DeepSeek…") },
-                        maxLines = 5,
-                        shape = RoundedCornerShape(22.dp),
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                IconButton(
-                    onClick = {
-                        if (viewModel.deepSeekChatSending) viewModel.stopDeepSeekAnswer()
-                        else if (draft.isNotBlank()) { viewModel.sendDeepSeekMessage(draft); draft = "" }
-                    },
-                    enabled = viewModel.deepSeekChatSending || draft.isNotBlank(),
-                    modifier = Modifier.size(48.dp),
-                ) {
-                    Icon(
-                        if (viewModel.deepSeekChatSending) Icons.Default.Close else Icons.Default.Send,
-                        contentDescription = if (viewModel.deepSeekChatSending) "停止生成" else "发送消息",
-                        tint = AppleBlue,
-                    )
-                }
-            }
+            CodexTerminalPane(viewModel, active)
         }
     }
 
-    if (showHistory) {
-        ModalBottomSheet(onDismissRequest = { showHistory = false }) {
-            Column(
-                Modifier.fillMaxWidth().fillMaxHeight(0.75f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 18.dp, vertical = 12.dp),
-            ) {
-                Text("DeepSeek 对话", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(12.dp))
-                TextButton(onClick = { viewModel.newDeepSeekConversation(); showHistory = false }, enabled = !viewModel.deepSeekChatSending) {
-                    Icon(Icons.Default.Add, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("新对话")
-                }
-                viewModel.deepSeekConversations.forEach { conversation ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            onClick = { viewModel.selectDeepSeekConversation(conversation.id); showHistory = false },
-                            enabled = !viewModel.deepSeekChatSending,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text(conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
-                        }
-                        IconButton(onClick = { deleteTarget = conversation.id }, enabled = !viewModel.deepSeekChatSending) {
-                            Icon(Icons.Default.Delete, contentDescription = "删除 ${conversation.title}")
-                        }
-                    }
-                }
-                Spacer(Modifier.height(24.dp))
-            }
-        }
-    }
-    if (deleteTarget != null) {
+    deleteTarget?.let { window ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("删除这段 DeepSeek 对话？") },
-            text = { Text("手机上的这段对话记录会永久删除。") },
+            title = { Text("删除 ${window.title}？") },
+            text = { Text("该窗口中的 Codex CLI 和对应 tmux 会话会结束。服务器项目文件不会被删除。") },
             confirmButton = {
-                TextButton(onClick = { deleteTarget?.let(viewModel::deleteDeepSeekConversation); deleteTarget = null }) { Text("删除") }
+                TextButton(onClick = {
+                    deleteTarget = null
+                    viewModel.deleteCodexWindow(window.id)
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
         )
     }
 }
+
+@Composable
+private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
+    viewModel: AppViewModel,
+    window: ChatSummary,
+) {
+    var input by remember(window.id) { mutableStateOf(TextFieldValue(viewModel.codexDraft(window.id))) }
+    val status = viewModel.codexTerminalStatus
+    val connected = status is TerminalStatus.Connected
+
+    BoxWithConstraints(
+        Modifier
+            .weight(1f)
+            .fillMaxWidth()
+            .background(Color(0xFF0B0F14))
+    ) {
+        val columns = (maxWidth.value / 6.7f).toInt().coerceIn(32, 100)
+        val rows = (maxHeight.value / 15.5f).toInt().coerceIn(12, 80)
+        LaunchedEffect(window.id, columns, rows) {
+            viewModel.resizeCodexTerminal(columns, rows)
+        }
+        val fallback = when (status) {
+            TerminalStatus.Connecting -> "正在连接 ${window.title}…"
+            TerminalStatus.Connected -> "Codex 已连接，等待终端输出…"
+            TerminalStatus.Disconnected -> "Codex 窗口连接已结束"
+            is TerminalStatus.Error -> status.message
+        }
+        Text(
+            viewModel.codexTerminalText.ifBlank { fallback },
+            modifier = Modifier.fillMaxSize().padding(horizontal = 9.dp, vertical = 8.dp),
+            color = if (status is TerminalStatus.Error) Color(0xFFFF9F9F) else Color(0xFFE6EDF3),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            lineHeight = 15.sp,
+            softWrap = false,
+        )
+        if (!connected && status !is TerminalStatus.Connecting) {
+            FilledTonalButton(
+                onClick = viewModel::reconnectCodexWindow,
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+            ) { Text("重连") }
+        }
+    }
+
+    Surface(color = MaterialTheme.colorScheme.background, shadowElevation = 8.dp) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 9.dp, vertical = 6.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(1.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CodexKeyButton("Esc", connected) { viewModel.sendCodexKey("\u001b") }
+                CodexKeyButton("Tab", connected) { viewModel.sendCodexKey("\t") }
+                CodexKeyButton("↑", connected) { viewModel.sendCodexKey("\u001b[A") }
+                CodexKeyButton("↓", connected) { viewModel.sendCodexKey("\u001b[B") }
+                CodexKeyButton("←", connected) { viewModel.sendCodexKey("\u001b[D") }
+                CodexKeyButton("→", connected) { viewModel.sendCodexKey("\u001b[C") }
+                CodexKeyButton("^C", connected) { viewModel.sendCodexControl(3) }
+                CodexKeyButton("^D", connected) { viewModel.sendCodexControl(4) }
+            }
+            Row(verticalAlignment = Alignment.Bottom) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = {
+                        input = it
+                        viewModel.updateCodexDraft(window.id, it.text)
+                    },
+                    modifier = Modifier.weight(1f).heightIn(min = 56.dp, max = 132.dp),
+                    enabled = connected,
+                    placeholder = { Text("输入给 Codex；回车换行，点右侧按钮发送", fontSize = 12.sp) },
+                    minLines = 1,
+                    maxLines = 5,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    shape = RoundedCornerShape(14.dp),
+                )
+                Spacer(Modifier.width(7.dp))
+                val sendEnabled = connected && input.text.isNotBlank() && input.composition == null
+                IconButton(
+                    onClick = {
+                        val submitted = input.text
+                        viewModel.sendCodexPrompt(submitted) {
+                            viewModel.updateCodexDraft(window.id, "")
+                            input = TextFieldValue("")
+                        }
+                    },
+                    enabled = sendEnabled,
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(if (sendEnabled) AppleBlue else MaterialTheme.colorScheme.surfaceVariant),
+                ) {
+                    Icon(Icons.Default.Send, contentDescription = "发送给 Codex", tint = Color.White, modifier = Modifier.size(19.dp))
+                }
+            }
+            Text(
+                when {
+                    input.composition != null -> "请先确认输入法候选词，再发送"
+                    status is TerminalStatus.Connected -> "中文输入法组合完成后才允许发送；草稿会随窗口保留"
+                    status is TerminalStatus.Connecting -> "正在恢复服务器终端…"
+                    status is TerminalStatus.Error -> status.message
+                    else -> "窗口暂未连接"
+                },
+                modifier = Modifier.padding(start = 4.dp, top = 3.dp),
+                color = if (input.composition != null || status is TerminalStatus.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CodexKeyButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
+    ) {
+        Text(label, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+    }
+}
+
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
