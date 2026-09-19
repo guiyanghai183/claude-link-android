@@ -230,9 +230,11 @@ class SshTunnelManager(
                 "printf '服务器尚未安装 Codex CLI\\n' >&2; exit 127; }; " +
                 "export TERM=xterm-256color; " +
                 "run_tmux() { env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" \"\$@\"; }; " +
-                "run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null || " +
-                "run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
-                "-c ${shellQuote(initialDirectory)} \"\$CODEX_BIN\"; " +
+                "if run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null; then " +
+                "run_tmux capture-pane -p -S -$CODEX_CAPTURE_HISTORY_ROWS " +
+                "-t ${shellQuote(tmuxName)} 2>/dev/null || true; " +
+                "else run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
+                "-c ${shellQuote(initialDirectory)} \"\$CODEX_BIN\"; fi; " +
                 "run_tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
                 "exec env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" " +
                 "attach-session -t ${shellQuote(tmuxName)}"
@@ -559,6 +561,7 @@ class SshTunnelManager(
 
     companion object {
         const val REMOTE_PORT = 18_765
+        private const val CODEX_CAPTURE_HISTORY_ROWS = 1_200
         private const val CONNECTION_ATTEMPTS = 3
         private const val CONNECT_TIMEOUT_MILLIS = 15_000
         private const val SOCKET_TIMEOUT_MILLIS = 12_000

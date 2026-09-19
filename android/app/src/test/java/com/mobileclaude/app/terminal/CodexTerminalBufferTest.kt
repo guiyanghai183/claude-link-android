@@ -79,4 +79,25 @@ class CodexTerminalBufferTest {
 
         assertEquals("alpha\nbeta", rendered)
     }
+
+    @Test
+    fun linesThatLeaveTheScreenRemainInScrollback() {
+        val buffer = CodexTerminalBuffer(columns = 12, rows = 12)
+        val lines = (1..14).map { "line-$it" }
+
+        buffer.append(lines.joinToString("\r\n"))
+
+        assertEquals(lines.joinToString("\n"), buffer.render())
+    }
+
+    @Test
+    fun reconnectClearRemovesThePreviousLocalScrollback() {
+        val buffer = CodexTerminalBuffer(columns = 12, rows = 12)
+        buffer.append((1..14).joinToString("\r\n") { "line-$it" })
+
+        buffer.clear()
+        buffer.append("restored")
+
+        assertEquals("restored", buffer.render())
+    }
 }

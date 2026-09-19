@@ -53,6 +53,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -98,6 +99,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -152,6 +154,7 @@ import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.UpdateState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import kotlin.math.roundToInt
@@ -2919,6 +2922,9 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
     val connected = status is TerminalStatus.Connected
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val terminalScrollState = rememberLazyListState()
+    val terminalScrollScope = rememberCoroutineScope()
+    var followTerminalOutput by remember(window.id) { mutableStateOf(true) }
 
     fun dismissKeyboard() {
         keyboardController?.hide()
@@ -2943,15 +2949,62 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
             TerminalStatus.Disconnected -> "Codex 窗口连接已结束"
             is TerminalStatus.Error -> status.message
         }
-        Text(
-            viewModel.codexTerminalText.ifBlank { fallback },
-            modifier = Modifier.fillMaxSize().padding(horizontal = 9.dp, vertical = 8.dp),
-            color = if (status is TerminalStatus.Error) Color(0xFFFF9F9F) else Color(0xFFE6EDF3),
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            lineHeight = 15.sp,
-            softWrap = false,
-        )
+        val terminalText = viewModel.codexTerminalText.ifBlank { fallback }
+        val terminalLines = remember(terminalText) { terminalText.split('\n') }
+        LaunchedEffect(window.id, terminalScrollState) {
+            snapshotFlow {
+                val layout = terminalScrollState.layoutInfo
+                val lastVisible = layout.visibleItemsInfo.lastOrNull()
+                val atBottom = lastVisible != null &&
+                    lastVisible.index == layout.totalItemsCount - 1 &&
+                    lastVisible.offset + lastVisible.size <=
+                    layout.viewportEndOffset + CODEX_SCROLL_BOTTOM_THRESHOLD_PX
+                terminalScrollState.isScrollInProgress to atBottom
+            }.collectLatest { (scrolling, atBottom) ->
+                if (scrolling) {
+                    followTerminalOutput = atBottom
+                }
+            }
+        }
+        LaunchedEffect(
+            window.id,
+            terminalLines.size,
+            followTerminalOutput,
+        ) {
+            if (followTerminalOutput && terminalLines.isNotEmpty()) {
+                terminalScrollState.scrollToItem(terminalLines.lastIndex)
+            }
+        }
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 9.dp, vertical = 8.dp),
+            state = terminalScrollState,
+        ) {
+            itemsIndexed(terminalLines) { _, line ->
+                Text(
+                    line,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 15.dp),
+                    color = if (status is TerminalStatus.Error) Color(0xFFFF9F9F) else Color(0xFFE6EDF3),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                    softWrap = false,
+                    maxLines = 1,
+                )
+            }
+        }
+        if (!followTerminalOutput && terminalLines.size > 1) {
+            FilledTonalButton(
+                onClick = {
+                    followTerminalOutput = true
+                    terminalScrollScope.launch {
+                        terminalScrollState.scrollToItem(terminalLines.lastIndex)
+                    }
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+            ) { Text("回到底部") }
+        }
         if (!connected && status !is TerminalStatus.Connecting) {
             FilledTonalButton(
                 onClick = viewModel::reconnectCodexWindow,
@@ -3058,6 +3111,7 @@ private fun CodexKeyButton(label: String, enabled: Boolean, onClick: () -> Unit)
 }
 
 private const val CODEX_RESIZE_DEBOUNCE_MILLIS = 180L
+private const val CODEX_SCROLL_BOTTOM_THRESHOLD_PX = 24
 
 
 @SuppressLint("SetJavaScriptEnabled")

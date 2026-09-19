@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "记住每台服务器上次使用的 Codex 窗口和页面，下次打开 Claude Link 并恢复 SSH 后自动重连同一 tmux/Codex 会话；将 Alt+↑、1、2、3、/permissions 和 /model 移到快捷键栏最前面。" \
+            --arg releaseNotes "Codex 页面支持直接上下拖动查看当前对话的终端历史；手动上滑后新输出不会强制跳回底部，可点击“回到底部”继续跟随，并在重新连接同一 tmux 会话时恢复服务器端历史。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

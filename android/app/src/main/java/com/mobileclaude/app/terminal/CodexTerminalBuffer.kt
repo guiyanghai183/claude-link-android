@@ -15,6 +15,7 @@ class CodexTerminalBuffer(
     private var columns = columns.coerceIn(MIN_COLUMNS, MAX_COLUMNS)
     private var rows = rows.coerceIn(MIN_ROWS, MAX_ROWS)
     private var cells = newScreen(this.columns, this.rows)
+    private val scrollback = ArrayDeque<CharArray>()
     private var cursorRow = 0
     private var cursorColumn = 0
     private var savedRow = 0
@@ -78,6 +79,7 @@ class CodexTerminalBuffer(
     @Synchronized
     fun clear(): String {
         cells = newScreen(columns, rows)
+        scrollback.clear()
         cursorRow = 0
         cursorColumn = 0
         savedRow = 0
@@ -91,10 +93,15 @@ class CodexTerminalBuffer(
     }
 
     @Synchronized
-    fun render(): String = cells.joinToString("\n") { row ->
-        buildString(columns) {
-            row.forEach { cell -> if (cell != WIDE_CONTINUATION) append(cell) }
-        }.trimEnd()
+    fun render(): String = buildString {
+        scrollback.forEach { row ->
+            append(renderRow(row))
+            append('\n')
+        }
+        cells.forEach { row ->
+            append(renderRow(row))
+            append('\n')
+        }
     }.trimEnd('\n')
 
     private fun consume(char: Char) {
@@ -351,6 +358,10 @@ class CodexTerminalBuffer(
     }
 
     private fun scrollUp(top: Int, bottom: Int) {
+        if (top == 0) {
+            scrollback.addLast(cells[top].copyOf())
+            while (scrollback.size > MAX_SCROLLBACK_ROWS) scrollback.removeFirst()
+        }
         for (row in top until bottom) cells[row + 1].copyInto(cells[row])
         cells[bottom].fill(' ')
     }
@@ -374,6 +385,10 @@ class CodexTerminalBuffer(
         cells.forEach { it.fill(' ') }
     }
 
+    private fun renderRow(row: CharArray): String = buildString(row.size) {
+        row.forEach { cell -> if (cell != WIDE_CONTINUATION) append(cell) }
+    }.trimEnd()
+
     private fun isWide(codePoint: Int): Boolean =
         codePoint in 0x1100..0x115f ||
             codePoint in 0x2329..0x232a ||
@@ -396,6 +411,7 @@ class CodexTerminalBuffer(
         const val MAX_COLUMNS = 160
         const val MIN_ROWS = 12
         const val MAX_ROWS = 100
+        const val MAX_SCROLLBACK_ROWS = 1_200
         private const val MAX_SEQUENCE_CHARS = 128
         private const val WIDE_CONTINUATION = '\u0000'
         private val COMBINING_RANGES = listOf(
