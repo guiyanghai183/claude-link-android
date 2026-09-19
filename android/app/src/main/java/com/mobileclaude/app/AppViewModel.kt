@@ -327,8 +327,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         connectionStatus = ConnectionStatus.Connected(health)
                         opened
                     }
-                    selectedTab = MainTab.CHATS
                     refreshChatsInternal()
+                    restoreProfileNavigation()
                     startConnectionHealthMonitor()
                     connection.bridgeWarning?.let { errorMessage = it }
                 } catch (error: Throwable) {
@@ -374,8 +374,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 profiles.clear()
                 profiles.addAll(profileRepository.load())
                 addServerVisible = false
-                selectedTab = MainTab.CHATS
                 refreshChatsInternal()
+                restoreProfileNavigation()
                 startConnectionHealthMonitor()
                 connection.bridgeWarning?.let { errorMessage = it }
             }
@@ -424,6 +424,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (selectedTab == tab) return
         val previous = selectedTab
         selectedTab = tab
+        activeProfile?.id?.let { profileRepository.setLastSelectedTab(it, tab) }
         if (previous == MainTab.CHATS && tab != MainTab.CHATS) stopTerminalSession()
         if (previous == MainTab.CODEX && tab != MainTab.CODEX) stopCodexTerminal()
         if (tab == MainTab.CHATS) {
@@ -490,6 +491,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 refreshChatsInternal()
                 activeCodexWindowId = created.id
                 selectedTab = MainTab.CODEX
+                rememberCodexNavigation(created.id)
                 startCodexTerminal(created.id, created.projectPath)
             }
         }
@@ -499,6 +501,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val window = codexWindows.firstOrNull { it.id == windowId } ?: return
         activeCodexWindowId = window.id
         selectedTab = MainTab.CODEX
+        rememberCodexNavigation(window.id)
         startCodexTerminal(window.id, window.projectPath)
     }
 
@@ -509,15 +512,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteCodexWindow(windowId: String) {
         val window = codexWindows.firstOrNull { it.id == windowId } ?: return
+        val wasActive = activeCodexWindowId == window.id
         viewModelScope.launch {
             runTask {
-                if (activeCodexWindowId == window.id) stopCodexTerminal()
+                if (wasActive) stopCodexTerminal()
                 withContext(Dispatchers.IO) { tunnel.killCodexWindow(window.id) }
                 callBridge { it.deleteChat(window.id) }
                 codexDrafts.remove(window.id)
                 refreshChatsInternal()
-                if (activeCodexWindowId == window.id) {
-                    activeCodexWindowId = codexWindows.firstOrNull()?.id
+                if (wasActive) {
                     activeCodexWindow?.let { startCodexTerminal(it.id, it.projectPath) }
                 }
             }
@@ -1408,8 +1411,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun refreshChatsInternal() {
         val updated = callBridge { it.listChats() }
+        val currentWindowId = activeCodexWindowId
+        val persistedWindowId = activeProfile?.id?.let(profileRepository::lastCodexWindowId)
         chats.clear()
         chats.addAll(updated)
+        activeCodexWindowId = chooseRestoredCodexWindowId(
+            availableIds = codexWindows.map(ChatSummary::id),
+            currentId = currentWindowId,
+            persistedId = persistedWindowId,
+        )
+        activeProfile?.id?.let { profileId ->
+            profileRepository.setLastCodexWindowId(profileId, activeCodexWindowId)
+        }
+    }
+
+    private fun rememberCodexNavigation(windowId: String) {
+        activeProfile?.id?.let { profileId ->
+            profileRepository.setLastCodexWindowId(profileId, windowId)
+            profileRepository.setLastSelectedTab(profileId, MainTab.CODEX)
+        }
+    }
+
+    private fun restoreProfileNavigation() {
+        val profileId = activeProfile?.id ?: return
+        selectedTab = profileRepository.lastSelectedTab(profileId) ?: MainTab.CHATS
+        if (selectedTab == MainTab.CODEX) {
+            activeCodexWindow?.let { startCodexTerminal(it.id, it.projectPath) }
+        }
     }
 
     private fun beginChatSelection(): Long {
@@ -1426,6 +1454,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (generation != activeChatGeneration) return
         activeChat = detail
         selectedTab = MainTab.CHATS
+        activeProfile?.id?.let { profileRepository.setLastSelectedTab(it, MainTab.CHATS) }
         if (detail.chat.mode == "terminal") {
             startTerminalSession(detail.chat.id, detail.chat.projectPath)
         } else {
@@ -1611,6 +1640,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val updated = withContext(Dispatchers.IO) { bridge.listChats() }
             chats.clear()
             chats.addAll(updated)
+            val profileId = activeProfile?.id
+            activeCodexWindowId = chooseRestoredCodexWindowId(
+                availableIds = codexWindows.map(ChatSummary::id),
+                currentId = activeCodexWindowId,
+                persistedId = profileId?.let(profileRepository::lastCodexWindowId),
+            )
+            profileId?.let { profileRepository.setLastCodexWindowId(it, activeCodexWindowId) }
+        }
+        activeProfile?.id?.let { profileId ->
+            selectedTab = profileRepository.lastSelectedTab(profileId) ?: selectedTab
         }
         if (selectedTab == MainTab.CODEX) {
             val window = activeCodexWindow
@@ -1685,6 +1724,14 @@ private const val MAX_CODEX_INPUT_CHARS = 32_000
 private const val MAX_CODEX_READ_BATCH_CHARS = 65_536
 private const val CODEX_TERMINAL_RENDER_INTERVAL_MILLIS = 50L
 private const val TERMINAL_PERSIST_INTERVAL_MILLIS = 300L
+
+internal fun chooseRestoredCodexWindowId(
+    availableIds: List<String>,
+    currentId: String?,
+    persistedId: String?,
+): String? = currentId?.takeIf(availableIds::contains)
+    ?: persistedId?.takeIf(availableIds::contains)
+    ?: availableIds.firstOrNull()
 
 private fun RemoteFileEntry.isPreviewableImage(): Boolean = mimeType.startsWith("image/") &&
     name.substringAfterLast('.', "").lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")

@@ -2971,12 +2971,6 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                 horizontalArrangement = Arrangement.spacedBy(1.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                CodexKeyButton("Esc", connected) { viewModel.sendCodexKey("\u001b") }
-                CodexKeyButton("Tab", connected) { viewModel.sendCodexKey("\t") }
-                CodexKeyButton("↑", connected) { viewModel.sendCodexKey("\u001b[A") }
-                CodexKeyButton("↓", connected) { viewModel.sendCodexKey("\u001b[B") }
-                CodexKeyButton("←", connected) { viewModel.sendCodexKey("\u001b[D") }
-                CodexKeyButton("→", connected) { viewModel.sendCodexKey("\u001b[C") }
                 CodexKeyButton("Alt+↑", connected) { viewModel.sendCodexKey("\u001b[1;3A") }
                 CodexKeyButton("1", connected) { viewModel.sendCodexKey("1") }
                 CodexKeyButton("2", connected) { viewModel.sendCodexKey("2") }
@@ -2989,6 +2983,12 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                     dismissKeyboard()
                     viewModel.sendCodexPrompt("/model")
                 }
+                CodexKeyButton("Esc", connected) { viewModel.sendCodexKey("\u001b") }
+                CodexKeyButton("Tab", connected) { viewModel.sendCodexKey("\t") }
+                CodexKeyButton("↑", connected) { viewModel.sendCodexKey("\u001b[A") }
+                CodexKeyButton("↓", connected) { viewModel.sendCodexKey("\u001b[B") }
+                CodexKeyButton("←", connected) { viewModel.sendCodexKey("\u001b[D") }
+                CodexKeyButton("→", connected) { viewModel.sendCodexKey("\u001b[C") }
                 CodexKeyButton("^C", connected) { viewModel.sendCodexControl(3) }
                 CodexKeyButton("^D", connected) { viewModel.sendCodexControl(4) }
             }

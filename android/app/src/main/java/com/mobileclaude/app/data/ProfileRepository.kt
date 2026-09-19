@@ -57,6 +57,25 @@ class ProfileRepository(context: Context) {
         }.apply()
     }
 
+    fun lastCodexWindowId(profileId: String): String? = preferences
+        .getString(lastCodexWindowKey(profileId), null)
+        ?.takeIf { it.isNotBlank() }
+
+    fun setLastCodexWindowId(profileId: String, windowId: String?) {
+        preferences.edit().apply {
+            if (windowId.isNullOrBlank()) remove(lastCodexWindowKey(profileId))
+            else putString(lastCodexWindowKey(profileId), windowId)
+        }.apply()
+    }
+
+    fun lastSelectedTab(profileId: String): MainTab? = preferences
+        .getString(lastSelectedTabKey(profileId), null)
+        ?.let { saved -> runCatching { MainTab.valueOf(saved) }.getOrNull() }
+
+    fun setLastSelectedTab(profileId: String, tab: MainTab) {
+        preferences.edit().putString(lastSelectedTabKey(profileId), tab.name).apply()
+    }
+
     fun delete(id: String) {
         val array = JSONArray()
         load().filterNot { it.id == id }.forEach {
@@ -74,8 +93,14 @@ class ProfileRepository(context: Context) {
         preferences.edit().apply {
             putString(PROFILES_KEY, array.toString())
             if (lastConnectedProfileId() == id) remove(LAST_CONNECTED_PROFILE_KEY)
+            remove(lastCodexWindowKey(id))
+            remove(lastSelectedTabKey(id))
         }.apply()
     }
+
+    private fun lastCodexWindowKey(profileId: String) = "last_codex_window_id_$profileId"
+
+    private fun lastSelectedTabKey(profileId: String) = "last_selected_tab_$profileId"
 
     private companion object {
         const val PROFILES_KEY = "profiles"

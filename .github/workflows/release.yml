@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复 Codex 终端中错误出现的 B 字符，通过批量解析、限频刷新和延迟终端尺寸调整改善手机流畅度；发送后自动收起输入法，并新增 Alt+↑、1、2、3、/permissions 和 /model 快捷键。" \
+            --arg releaseNotes "记住每台服务器上次使用的 Codex 窗口和页面，下次打开 Claude Link 并恢复 SSH 后自动重连同一 tmux/Codex 会话；将 Alt+↑、1、2、3、/permissions 和 /model 移到快捷键栏最前面。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
