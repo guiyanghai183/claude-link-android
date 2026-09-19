@@ -110,6 +110,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -149,6 +151,7 @@ import com.mobileclaude.app.data.ServerProfile
 import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.UpdateState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import kotlin.math.roundToInt
@@ -2914,6 +2917,13 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
     var input by remember(window.id) { mutableStateOf(TextFieldValue(viewModel.codexDraft(window.id))) }
     val status = viewModel.codexTerminalStatus
     val connected = status is TerminalStatus.Connected
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    fun dismissKeyboard() {
+        keyboardController?.hide()
+        focusManager.clearFocus(force = true)
+    }
 
     BoxWithConstraints(
         Modifier
@@ -2924,6 +2934,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
         val columns = (maxWidth.value / 6.7f).toInt().coerceIn(32, 100)
         val rows = (maxHeight.value / 15.5f).toInt().coerceIn(12, 80)
         LaunchedEffect(window.id, columns, rows) {
+            delay(CODEX_RESIZE_DEBOUNCE_MILLIS)
             viewModel.resizeCodexTerminal(columns, rows)
         }
         val fallback = when (status) {
@@ -2966,6 +2977,18 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                 CodexKeyButton("↓", connected) { viewModel.sendCodexKey("\u001b[B") }
                 CodexKeyButton("←", connected) { viewModel.sendCodexKey("\u001b[D") }
                 CodexKeyButton("→", connected) { viewModel.sendCodexKey("\u001b[C") }
+                CodexKeyButton("Alt+↑", connected) { viewModel.sendCodexKey("\u001b[1;3A") }
+                CodexKeyButton("1", connected) { viewModel.sendCodexKey("1") }
+                CodexKeyButton("2", connected) { viewModel.sendCodexKey("2") }
+                CodexKeyButton("3", connected) { viewModel.sendCodexKey("3") }
+                CodexKeyButton("/permissions", connected) {
+                    dismissKeyboard()
+                    viewModel.sendCodexPrompt("/permissions")
+                }
+                CodexKeyButton("/model", connected) {
+                    dismissKeyboard()
+                    viewModel.sendCodexPrompt("/model")
+                }
                 CodexKeyButton("^C", connected) { viewModel.sendCodexControl(3) }
                 CodexKeyButton("^D", connected) { viewModel.sendCodexControl(4) }
             }
@@ -2990,6 +3013,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                 IconButton(
                     onClick = {
                         val submitted = input.text
+                        dismissKeyboard()
                         viewModel.sendCodexPrompt(submitted) {
                             viewModel.updateCodexDraft(window.id, "")
                             input = TextFieldValue("")
@@ -3032,6 +3056,8 @@ private fun CodexKeyButton(label: String, enabled: Boolean, onClick: () -> Unit)
         Text(label, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
     }
 }
+
+private const val CODEX_RESIZE_DEBOUNCE_MILLIS = 180L
 
 
 @SuppressLint("SetJavaScriptEnabled")

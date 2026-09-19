@@ -54,6 +54,8 @@ class SshTerminalSession internal constructor(
 
     fun read(buffer: CharArray): Int = reader.read(buffer)
 
+    fun hasReadableData(): Boolean = reader.ready()
+
     fun write(text: String) {
         synchronized(writer) {
             writer.write(text.toByteArray(Charsets.UTF_8))

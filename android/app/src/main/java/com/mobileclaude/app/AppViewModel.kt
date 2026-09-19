@@ -618,10 +618,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             val count = opened.read(buffer)
                             if (count < 0) break
                             if (count == 0) continue
-                            val chunk = String(buffer, 0, count)
+                            val pending = StringBuilder(count.coerceAtLeast(8_192))
+                            pending.append(buffer, 0, count)
+                            delay(CODEX_TERMINAL_RENDER_INTERVAL_MILLIS)
+                            while (
+                                pending.length < MAX_CODEX_READ_BATCH_CHARS &&
+                                opened.hasReadableData()
+                            ) {
+                                val availableCount = opened.read(buffer)
+                                if (availableCount <= 0) break
+                                pending.append(buffer, 0, availableCount)
+                            }
+                            val rendered = codexBuffer.append(pending.toString())
                             withContext(Dispatchers.Main) {
-                                if (generation == codexGeneration) {
-                                    codexTerminalText = codexBuffer.append(chunk)
+                                if (
+                                    generation == codexGeneration &&
+                                    rendered != codexTerminalText
+                                ) {
+                                    codexTerminalText = rendered
                                 }
                             }
                         }
@@ -1668,6 +1682,8 @@ private const val MAX_IMAGE_PREVIEW_DIMENSION = 2_048
 private const val MAX_TERMINAL_COMMAND_CHARS = 16_000
 private const val MAX_CODEX_WINDOWS = 6
 private const val MAX_CODEX_INPUT_CHARS = 32_000
+private const val MAX_CODEX_READ_BATCH_CHARS = 65_536
+private const val CODEX_TERMINAL_RENDER_INTERVAL_MILLIS = 50L
 private const val TERMINAL_PERSIST_INTERVAL_MILLIS = 300L
 
 private fun RemoteFileEntry.isPreviewableImage(): Boolean = mimeType.startsWith("image/") &&

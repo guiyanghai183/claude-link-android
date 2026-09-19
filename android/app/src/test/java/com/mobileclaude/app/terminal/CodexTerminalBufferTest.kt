@@ -43,6 +43,24 @@ class CodexTerminalBufferTest {
     }
 
     @Test
+    fun splitCharsetSelectionDoesNotLeakLetterBIntoScreen() {
+        val buffer = CodexTerminalBuffer(columns = 24, rows = 3)
+        buffer.append("\u001b(")
+        buffer.append("BTip: \u001b)BNew")
+
+        assertEquals("Tip: New", buffer.render())
+    }
+
+    @Test
+    fun eightBitCsiIsHandledAsControlSequence() {
+        val buffer = CodexTerminalBuffer(columns = 16, rows = 3)
+        buffer.append("stale")
+        buffer.append("\u009b2J\u009bHready")
+
+        assertEquals("ready", buffer.render())
+    }
+
+    @Test
     fun supplementaryWideGlyphSurvivesChunkBoundary() {
         val buffer = CodexTerminalBuffer(columns = 8, rows = 3)
         val emoji = "🚀"

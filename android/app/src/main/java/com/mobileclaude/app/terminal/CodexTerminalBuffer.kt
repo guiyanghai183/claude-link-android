@@ -101,6 +101,7 @@ class CodexTerminalBuffer(
         when (state) {
             ParserState.NORMAL -> consumeNormal(char)
             ParserState.ESCAPE -> consumeEscape(char)
+            ParserState.ESCAPE_INTERMEDIATE -> consumeEscapeIntermediate(char)
             ParserState.CSI -> consumeCsi(char)
             ParserState.OSC -> consumeOsc(char)
             ParserState.OSC_ESCAPE -> {
@@ -112,11 +113,19 @@ class CodexTerminalBuffer(
     private fun consumeNormal(char: Char) {
         when (char) {
             '\u001b' -> state = ParserState.ESCAPE
+            '\u009b' -> {
+                sequence.clear()
+                state = ParserState.CSI
+            }
+            '\u009d' -> {
+                sequence.clear()
+                state = ParserState.OSC
+            }
             '\r' -> cursorColumn = 0
             '\n', '\u000b', '\u000c' -> lineFeed()
             '\b' -> cursorColumn = (cursorColumn - 1).coerceAtLeast(0)
             '\t' -> cursorColumn = (((cursorColumn / 8) + 1) * 8).coerceAtMost(columns - 1)
-            '\u0007', '\u0000' -> Unit
+            '\u0007', '\u0000', '\u000e', '\u000f' -> Unit
             else -> if (char.code >= 0x20 && char.code != 0x7f) putCodePoint(char.code)
         }
     }
@@ -156,8 +165,17 @@ class CodexTerminalBuffer(
                 clear()
                 state = ParserState.NORMAL
             }
-            else -> state = ParserState.NORMAL
+            else -> state = if (char.code in 0x20..0x2f) {
+                ParserState.ESCAPE_INTERMEDIATE
+            } else {
+                ParserState.NORMAL
+            }
         }
+    }
+
+    /** Consume sequences such as ESC ( B, which selects the ASCII character set. */
+    private fun consumeEscapeIntermediate(char: Char) {
+        if (char.code in 0x30..0x7e) state = ParserState.NORMAL
     }
 
     private fun consumeCsi(char: Char) {
@@ -369,7 +387,7 @@ class CodexTerminalBuffer(
             codePoint in 0x1f300..0x1faff ||
             codePoint in 0x20000..0x3fffd
 
-    private enum class ParserState { NORMAL, ESCAPE, CSI, OSC, OSC_ESCAPE }
+    private enum class ParserState { NORMAL, ESCAPE, ESCAPE_INTERMEDIATE, CSI, OSC, OSC_ESCAPE }
 
     companion object {
         const val DEFAULT_COLUMNS = 56

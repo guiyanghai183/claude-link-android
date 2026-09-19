@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复 74 号机 Conda 动态库冲突导致 Codex 窗口无法连接的问题；显式使用 gyhai 用户的新版 Codex CLI，并隐藏窗口启动命令回显。" \
+            --arg releaseNotes "修复 Codex 终端中错误出现的 B 字符，通过批量解析、限频刷新和延迟终端尺寸调整改善手机流畅度；发送后自动收起输入法，并新增 Alt+↑、1、2、3、/permissions 和 /model 快捷键。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
