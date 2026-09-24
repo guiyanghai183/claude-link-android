@@ -28,7 +28,7 @@ GitHub 仓库：<https://github.com/guiyanghai183/claude-link-android>
 - 每个 Codex 窗口由服务器端独立 tmux 会话承载；切换窗口、切换页面、关闭应用或手机网络短暂断开不会结束 Codex。应用按服务器记住上次选中的 Codex 窗口和页面，下次打开并恢复 SSH 后会重新附着同名 tmux 会话；删除窗口时才结束对应会话。
 - 创建 Codex 窗口时会把已解析的 Codex CLI 路径显式传入 tmux，并检查会话是否在启动后保持存活；启动失败会显示明确错误，不再退化为 `can't find session`。
 - Codex 窗口按手机屏幕动态调整终端行列数，对高频终端输出进行后台批量解析和限频刷新；终端区可上下拖动查看当前对话的回滚历史，手动上滑后不会被新输出强制拉回底部，并可点击“回到底部”恢复自动跟随。重新连接同一窗口时会从服务器 tmux 恢复最近 1,200 行历史。
-- Codex 页支持“扫码接力”：扫描 Codex/ChatGPT 生成的 `claudelink://handoff/v1` 二维码后，先预览来源、标题和接力摘要，经用户确认再创建窗口。二维码含真实 Codex UUID 且当前服务器存在该会话时执行 `codex resume`；跨主机或 ChatGPT 对话则自动以摘要创建新会话。
+- Codex 页支持“扫码接力”：扫描 Codex/ChatGPT 生成的 `claudelink://handoff/v1` 二维码后，先预览来源、标题和接力摘要，经用户确认再创建窗口。扫码画面左上角提供明确的“返回”按钮，也支持系统返回键或手势取消扫码。二维码含真实 Codex UUID 且当前服务器存在该会话时执行 `codex resume`；跨主机或 ChatGPT 对话则自动以摘要创建新会话。
 - 快捷键栏最前面依次是 Alt+↑、1、2、3、`/permissions`、`/model`，后续是 Esc、Tab、方向键、`^C`、`^D`。输入区支持多行草稿，在中文输入法候选词尚未确认时禁止发送，成功提交后会立即收起输入法。
 - 旧版网页 OCR 附加入口不再展示；已有 Claude 项目对话及文件交付仍保留。
 - GitHub Releases 应用内更新：启动自动检查、发布说明、SHA-256 校验和系统安装确认。
@@ -60,7 +60,7 @@ GitHub 仓库：<https://github.com/guiyanghai183/claude-link-android>
 ## Codex / ChatGPT 对话接力
 
 1. 在 Codex 或 ChatGPT 对话中说“生成该对话的二维码供我在 Claude Link 中使用”。`Claude Link 对话接力` 插件会把当前目标、已完成证据、约束和下一步压缩进二维码，不上传到临时中转服务器。
-2. 在 Claude Link 的“Codex”页点击“扫码接力”，扫描二维码并核对预览。点击“继续回答”后才会创建新的 Codex 窗口。
+2. 在 Claude Link 的“Codex”页点击“扫码接力”，扫描二维码并核对预览；如需退出，可点击左上角“返回”或使用系统返回键/手势。点击“继续回答”后才会创建新的 Codex 窗口。
 3. 若二维码含真实 Codex 会话 UUID，Claude Link 会先检查当前 SSH 服务器的 `~/.codex/sessions`；存在时恢复原会话，不存在时使用接力摘要启动新会话。ChatGPT 对话和跨主机接力始终采用摘要启动。
 
 二维码是自包含数据，任何能扫描它的人都能读取其中的接力摘要。生成端会拦截常见密钥格式，但仍不应把密码、Cookie、API Key、访问令牌或无关个人信息放入摘要。

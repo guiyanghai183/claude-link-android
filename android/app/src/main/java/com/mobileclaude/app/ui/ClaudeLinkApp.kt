@@ -129,7 +129,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.media3.common.MediaItem
@@ -155,6 +154,7 @@ import com.mobileclaude.app.data.RemoteFileEntry
 import com.mobileclaude.app.data.ServerProfile
 import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.UpdateState
+import com.mobileclaude.app.handoff.claudeLinkHandoffScanOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -2824,14 +2824,7 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
             }
             TextButton(
                 onClick = {
-                    handoffScanner.launch(
-                        ScanOptions()
-                            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                            .setPrompt("扫描 Codex 或 ChatGPT 生成的 Claude Link 接力二维码")
-                            .setBeepEnabled(false)
-                            .setBarcodeImageEnabled(false)
-                            .setOrientationLocked(false),
-                    )
+                    handoffScanner.launch(claudeLinkHandoffScanOptions())
                 },
                 enabled = windows.size < 6 && !viewModel.busy,
             ) {
