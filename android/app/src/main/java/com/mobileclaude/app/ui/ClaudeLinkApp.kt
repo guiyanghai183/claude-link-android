@@ -12,6 +12,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -127,6 +128,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.media3.common.MediaItem
@@ -2799,6 +2802,9 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
     val windows = viewModel.codexWindows
     val active = viewModel.activeCodexWindow
     var deleteTarget by remember { mutableStateOf<ChatSummary?>(null) }
+    val handoffScanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let(viewModel::previewCodexHandoff)
+    }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(
@@ -2815,6 +2821,21 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
                 )
+            }
+            TextButton(
+                onClick = {
+                    handoffScanner.launch(
+                        ScanOptions()
+                            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                            .setPrompt("扫描 Codex 或 ChatGPT 生成的 Claude Link 接力二维码")
+                            .setBeepEnabled(false)
+                            .setBarcodeImageEnabled(false)
+                            .setOrientationLocked(false),
+                    )
+                },
+                enabled = windows.size < 6 && !viewModel.busy,
+            ) {
+                Text("扫码接力")
             }
             if (active != null) {
                 IconButton(onClick = { deleteTarget = active }) {
@@ -2908,6 +2929,45 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
                 }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
+        )
+    }
+
+    viewModel.pendingCodexHandoff?.let { handoff ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissCodexHandoff,
+            title = { Text("接力到新的 Codex 窗口？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "${handoff.source} · ${handoff.title}",
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        if (handoff.threadId == null) {
+                            "将在当前服务器新建窗口，并用下面的摘要继续。"
+                        } else {
+                            "如果当前服务器存在原会话，将恢复原会话；否则用下面的摘要新建会话。"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                    SelectionContainer {
+                        Text(
+                            handoff.handoff,
+                            modifier = Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()),
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = viewModel::acceptCodexHandoff, enabled = !viewModel.busy) {
+                    Text("继续回答")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissCodexHandoff) { Text("取消") }
+            },
         )
     }
 }

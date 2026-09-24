@@ -28,6 +28,8 @@ import com.mobileclaude.app.data.ServerProfile
 import com.mobileclaude.app.data.TerminalStatus
 import com.mobileclaude.app.data.WebAttachment
 import com.mobileclaude.app.data.UpdateState
+import com.mobileclaude.app.handoff.ClaudeLinkHandoff
+import com.mobileclaude.app.handoff.ClaudeLinkHandoffCodec
 import com.mobileclaude.app.network.BridgeApi
 import com.mobileclaude.app.security.CredentialVault
 import com.mobileclaude.app.ssh.SshTunnelManager
@@ -131,6 +133,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val projectChats: List<ChatSummary>
         get() = chats.filter { it.mode != "codex" }
     var activeCodexWindowId by mutableStateOf<String?>(null)
+        private set
+    var pendingCodexHandoff by mutableStateOf<ClaudeLinkHandoff?>(null)
         private set
     val activeCodexWindow: ChatSummary?
         get() = codexWindows.firstOrNull { it.id == activeCodexWindowId }
@@ -497,6 +501,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun previewCodexHandoff(raw: String) {
+        pendingCodexHandoff = try {
+            ClaudeLinkHandoffCodec.decode(raw)
+        } catch (error: IllegalArgumentException) {
+            errorMessage = error.message ?: "无法读取 Claude Link 接力二维码"
+            null
+        }
+    }
+
+    fun dismissCodexHandoff() {
+        pendingCodexHandoff = null
+    }
+
+    fun acceptCodexHandoff() {
+        val handoff = pendingCodexHandoff ?: return
+        pendingCodexHandoff = null
+        if (codexWindows.size >= MAX_CODEX_WINDOWS) {
+            errorMessage = "Codex 窗口最多只能创建 $MAX_CODEX_WINDOWS 个；请先删除一个窗口再扫码接力"
+            return
+        }
+        val clientChatId = UUID.randomUUID().toString()
+        viewModelScope.launch {
+            runTask {
+                val home = (connectionStatus as? ConnectionStatus.Connected)?.health?.home
+                    ?: error("服务器尚未连接")
+                val created = callBridge { it.createChat(home, clientChatId, "codex") }
+                refreshChatsInternal()
+                activeCodexWindowId = created.id
+                selectedTab = MainTab.CODEX
+                rememberCodexNavigation(created.id)
+                startCodexTerminal(created.id, created.projectPath, handoff)
+            }
+        }
+    }
+
     fun openCodexWindow(windowId: String) {
         val window = codexWindows.firstOrNull { it.id == windowId } ?: return
         activeCodexWindowId = window.id
@@ -591,7 +630,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun startCodexTerminal(windowId: String, projectPath: String) {
+    private fun startCodexTerminal(
+        windowId: String,
+        projectPath: String,
+        handoff: ClaudeLinkHandoff? = null,
+    ) {
         stopTerminalSession()
         stopCodexTerminal()
         activeCodexWindowId = windowId
@@ -601,7 +644,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val opened = withContext(Dispatchers.IO) {
-                    tunnel.openCodexTerminal(windowId, projectPath, codexColumns, codexRows)
+                    tunnel.openCodexTerminal(
+                        windowId = windowId,
+                        initialDirectory = projectPath,
+                        columns = codexColumns,
+                        rows = codexRows,
+                        resumeSessionId = handoff?.threadId,
+                        initialPrompt = handoff?.initialPrompt(),
+                    )
                 }
                 if (
                     generation != codexGeneration ||

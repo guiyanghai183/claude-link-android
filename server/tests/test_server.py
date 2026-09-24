@@ -26,6 +26,7 @@ from mobile_claude_server import (  # noqa: E402
     ServiceState,
     Store,
     _fetch_process_metadata,
+    _parse_gpuq_list,
     extract_video_handoffs,
     fetch_gpu_snapshot,
     fetch_gpuq_snapshot,
@@ -865,6 +866,54 @@ class GpuqSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args.kwargs["timeout"], GPUQ_COMMAND_TIMEOUT_SECONDS)
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_added_columns_and_cpu_footer_preserve_job_details(self):
+        output = (
+            "ID  状态     GPU数  GPU     PID  CPU      盘读  优先级  名称                         已等待    已运行\n"
+            "--  -------  -----  ---  ------  -------  ----  ------  ---------------------------  --------  --------\n"
+            "21  running      1  0    424242  1410.8%  0B/s       0  train  model                 00:00:01  05:35:14\n"
+            "CPU: 12.0% (11.5/96 cores) | Memory: 130.3GiB/503.5GiB (25.9%)\n"
+            "Task CPU (whole process tree, 100% = 1 core):\n"
+            "  job21 train-model-s42: 1410.8% (14.1 cores, PID 424242)\n"
+        )
+
+        jobs = _parse_gpuq_list(output)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["id"], 21)
+        self.assertEqual(jobs[0]["name"], "train  model")
+        self.assertEqual(jobs[0]["pid"], 424242)
+        self.assertEqual(jobs[0]["running"], "05:35:14")
+
+    def test_compact_cards_with_monitoring_footer_are_supported(self):
+        output = (
+            "● #119 运行中  yanji-6e3f57b617d6-713d814f\n"
+            "  GPU: 3 / 1张              PID: 529458\n"
+            "  等待: 00:00:01            运行: 00:46:11\n"
+            "  磁盘读取: 0B/s            磁盘写入: 0B/s\n"
+            "CPU: 12.0% (11.5/96 cores) | Memory: 130.3GiB/503.5GiB (25.9%)\n"
+            "Task CPU (whole process tree, 100% = 1 core):\n"
+            "  job119 yanji-6e3f57b617d6-713d814f: 1410.8% (14.1 cores, PID 529458)\n"
+        )
+
+        jobs = _parse_gpuq_list(output)
+
+        self.assertEqual(
+            jobs,
+            [
+                {
+                    "id": 119,
+                    "status": "running",
+                    "gpuCount": 1,
+                    "gpuIndices": "3",
+                    "pid": 529458,
+                    "priority": 0,
+                    "name": "yanji-6e3f57b617d6-713d814f",
+                    "waited": "00:00:01",
+                    "running": "00:46:11",
+                }
+            ],
+        )
 
     def test_legacy_gpuq_fallback_when_stable_flags_are_unsupported(self):
         unsupported = subprocess.CompletedProcess(

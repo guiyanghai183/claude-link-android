@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "Codex 页面支持直接上下拖动查看当前对话的终端历史；手动上滑后新输出不会强制跳回底部，可点击“回到底部”继续跟随，并在重新连接同一 tmux 会话时恢复服务器端历史。" \
+            --arg releaseNotes "修复算力模块在 gpuq list 增加 CPU/I/O 列或监控摘要后无法显示任务详情的问题，并兼容宽表与紧凑卡片输出；Codex 页面新增扫码接力，可预览并恢复本机原会话或按摘要创建新会话。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

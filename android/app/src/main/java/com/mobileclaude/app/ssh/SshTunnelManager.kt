@@ -215,7 +215,29 @@ class SshTunnelManager(
         initialDirectory: String,
         columns: Int,
         rows: Int,
+        resumeSessionId: String? = null,
+        initialPrompt: String? = null,
     ): SshTerminalSession {
+        require(resumeSessionId == null || CODEX_SESSION_ID_REGEX.matches(resumeSessionId)) {
+            "Codex 会话 UUID 无效"
+        }
+        val prompt = initialPrompt?.trim()?.takeIf { it.isNotEmpty() }
+        require(prompt == null || prompt.length <= MAX_CODEX_HANDOFF_PROMPT_CHARS) {
+            "Codex 接力摘要过长"
+        }
+        val launchCommand = when {
+            resumeSessionId != null && prompt != null -> {
+                val sessionPattern = "*$resumeSessionId*.jsonl"
+                "if [ -d \"\$HOME/.codex/sessions\" ] && " +
+                    "find \"\$HOME/.codex/sessions\" -type f -name ${shellQuote(sessionPattern)} " +
+                    "-print -quit 2>/dev/null | grep -q .; then " +
+                    "exec \"\$CODEX_BIN\" resume ${shellQuote(resumeSessionId)} ${shellQuote(prompt)}; " +
+                    "else exec \"\$CODEX_BIN\" ${shellQuote(prompt)}; fi"
+            }
+            resumeSessionId != null -> "exec \"\$CODEX_BIN\" resume ${shellQuote(resumeSessionId)}"
+            prompt != null -> "exec \"\$CODEX_BIN\" ${shellQuote(prompt)}"
+            else -> "exec \"\$CODEX_BIN\""
+        }
         val tmuxName = codexTmuxName(windowId)
         return openShell(initialDirectory, columns, rows) {
             "stty -echo; printf '\\033[2J\\033[H'; " +
@@ -228,13 +250,13 @@ class SshTunnelManager(
                 "CODEX_BIN=\"\$(type -P codex)\"; " +
                 "[ -n \"\$CODEX_BIN\" ] || { " +
                 "printf '服务器尚未安装 Codex CLI\\n' >&2; exit 127; }; " +
-                "export TERM=xterm-256color; " +
+                "export CODEX_BIN TERM=xterm-256color; " +
                 "run_tmux() { env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" \"\$@\"; }; " +
                 "if run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null; then " +
                 "run_tmux capture-pane -p -S -$CODEX_CAPTURE_HISTORY_ROWS " +
                 "-t ${shellQuote(tmuxName)} 2>/dev/null || true; " +
                 "else run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
-                "-c ${shellQuote(initialDirectory)} \"\$CODEX_BIN\"; fi; " +
+                "-c ${shellQuote(initialDirectory)} ${shellQuote(launchCommand)}; fi; " +
                 "run_tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
                 "exec env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" " +
                 "attach-session -t ${shellQuote(tmuxName)}"
@@ -562,6 +584,11 @@ class SshTunnelManager(
     companion object {
         const val REMOTE_PORT = 18_765
         private const val CODEX_CAPTURE_HISTORY_ROWS = 1_200
+        private const val MAX_CODEX_HANDOFF_PROMPT_CHARS = 8_000
+        private val CODEX_SESSION_ID_REGEX = Regex(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            RegexOption.IGNORE_CASE,
+        )
         private const val CONNECTION_ATTEMPTS = 3
         private const val CONNECT_TIMEOUT_MILLIS = 15_000
         private const val SOCKET_TIMEOUT_MILLIS = 12_000

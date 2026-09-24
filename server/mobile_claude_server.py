@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.27"
+APP_VERSION = "0.3.28"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -324,42 +324,104 @@ def _gpuq_unavailable(reason: str, message: str) -> dict[str, Any]:
 
 
 def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
-    """Parse gpuq's human-readable active queue table without invoking a shell."""
-    lines = [line.rstrip() for line in clean_text(output).splitlines() if line.strip()]
-    if not lines or (len(lines) == 1 and lines[0].strip() == "队列为空"):
-        return []
-    if len(lines) < 3:
-        raise ValueError("gpuq list 输出缺少表头")
-    headers = tuple(re.split(r"\s{2,}", lines[0].strip()))
-    if headers != GPUQ_LIST_FIELDS or not re.fullmatch(r"[-\s]+", lines[1].strip()):
-        raise ValueError("gpuq list 表头格式不受支持")
+    """Parse gpuq's wide or compact active queue output without invoking a shell.
 
-    jobs: list[dict[str, Any]] = []
-    for line in lines[2:]:
-        parts = re.split(r"\s{2,}", line.strip())
-        if len(parts) < len(GPUQ_LIST_FIELDS):
-            raise ValueError("gpuq list 任务行字段不足")
-        if len(parts) > len(GPUQ_LIST_FIELDS):
-            parts = parts[:6] + ["  ".join(parts[6:-2])] + parts[-2:]
-        job_id = _optional_int(parts[0])
-        gpu_count = _optional_int(parts[2])
-        priority = _optional_int(parts[5])
-        if job_id is None or gpu_count is None or priority is None:
-            raise ValueError("gpuq list 任务行数字字段无效")
-        jobs.append(
-            {
-                "id": job_id,
-                "status": parts[1].strip().lower(),
-                "gpuCount": gpu_count,
-                "gpuIndices": "" if parts[3].strip() == "-" else parts[3].strip(),
-                "pid": _optional_int(parts[4]),
-                "priority": priority,
-                "name": clean_text(parts[6]).strip()[:200] or f"任务 {job_id}",
-                "waited": parts[7].strip(),
-                "running": parts[8].strip(),
-            }
-        )
-    return jobs
+    gpuq is primarily a human-facing command, so monitoring helpers may add
+    columns (for example CPU or I/O rates) or append host summaries.  Keep the
+    app coupled only to the stable core fields and stop at non-job footer text.
+    """
+    lines = [line.rstrip() for line in clean_text(output).splitlines() if line.strip()]
+    if not lines or any(line.strip() == "队列为空" for line in lines):
+        return []
+
+    required_headers = set(GPUQ_LIST_FIELDS)
+    for header_index, header_line in enumerate(lines[:-1]):
+        headers = tuple(re.split(r"\s{2,}", header_line.strip()))
+        if not required_headers.issubset(headers):
+            continue
+        if not re.fullmatch(r"(?:-+\s{2,})*-+", lines[header_index + 1].strip()):
+            continue
+
+        name_index = headers.index("名称")
+        suffix_count = len(headers) - name_index - 1
+        jobs: list[dict[str, Any]] = []
+        for line in lines[header_index + 2 :]:
+            # CPU summaries, nvidia-smi sections, and other monitoring footers
+            # are not queue rows.  Once jobs started, they terminate the table.
+            if not re.match(r"^\s*\d+(?:\s{2,}|$)", line):
+                if jobs:
+                    break
+                continue
+            parts = re.split(r"\s{2,}", line.strip())
+            if len(parts) < len(headers):
+                raise ValueError("gpuq list 任务行字段不足")
+            if len(parts) > len(headers):
+                name_end = len(parts) - suffix_count
+                parts = parts[:name_index] + ["  ".join(parts[name_index:name_end])] + parts[name_end:]
+            values = dict(zip(headers, parts, strict=True))
+            job_id = _optional_int(values["ID"])
+            gpu_count = _optional_int(values["GPU数"])
+            priority = _optional_int(values["优先级"])
+            if job_id is None or gpu_count is None or priority is None:
+                raise ValueError("gpuq list 任务行数字字段无效")
+            gpu_indices = values["GPU"].strip()
+            jobs.append(
+                {
+                    "id": job_id,
+                    "status": values["状态"].strip().lower(),
+                    "gpuCount": gpu_count,
+                    "gpuIndices": "" if gpu_indices == "-" else gpu_indices,
+                    "pid": _optional_int(values["PID"]),
+                    "priority": priority,
+                    "name": clean_text(values["名称"]).strip()[:200] or f"任务 {job_id}",
+                    "waited": values["已等待"].strip(),
+                    "running": values["已运行"].strip(),
+                }
+            )
+        return jobs
+
+    compact_start = re.compile(r"^[●○]\s*#(?P<id>\d+)\s+(?P<status>\S+)\s{2,}(?P<name>.+)$")
+    status_map = {"运行中": "running", "排队中": "queued", "等待中": "queued"}
+    jobs = []
+    index = 0
+    while index < len(lines):
+        match = compact_start.match(lines[index].strip())
+        if match is None:
+            index += 1
+            continue
+        job_id = int(match.group("id"))
+        job: dict[str, Any] = {
+            "id": job_id,
+            "status": status_map.get(match.group("status"), match.group("status").lower()),
+            "gpuCount": 0,
+            "gpuIndices": "",
+            "pid": None,
+            "priority": 0,
+            "name": clean_text(match.group("name")).strip()[:200] or f"任务 {job_id}",
+            "waited": "-",
+            "running": "-",
+        }
+        index += 1
+        while index < len(lines) and compact_start.match(lines[index].strip()) is None:
+            detail = lines[index].strip()
+            gpu = re.search(r"GPU:\s*(\S+)\s*/\s*(\d+)张", detail)
+            pid = re.search(r"PID:\s*([\d-]+)", detail)
+            timing = re.search(r"等待:\s*(\S+).*?运行:\s*(\S+)", detail)
+            priority = re.search(r"优先级\s*[:：]?\s*(\d+)", detail)
+            if gpu:
+                job["gpuIndices"] = "" if gpu.group(1) == "-" else gpu.group(1)
+                job["gpuCount"] = int(gpu.group(2))
+            if pid:
+                job["pid"] = _optional_int(pid.group(1))
+            if timing:
+                job["waited"], job["running"] = timing.groups()
+            if priority:
+                job["priority"] = int(priority.group(1))
+            index += 1
+        jobs.append(job)
+    if jobs:
+        return jobs
+    raise ValueError("gpuq list 表头格式不受支持")
 
 
 def _gpuq_list_flags_unsupported(result: subprocess.CompletedProcess[str]) -> bool:
