@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.30"
+APP_VERSION = "0.3.31"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -69,7 +69,15 @@ ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 GPU_CACHE_TTL_SECONDS = 0.8
 GPU_COMMAND_TIMEOUT_SECONDS = 3
 GPUQ_COMMAND_TIMEOUT_SECONDS = 3
-GPUQ_STABLE_LIST_ARGS = ("list", "--format", "wide", "--no-io")
+GPUQ_IO_SAMPLE_SECONDS = 0.2
+GPUQ_CPU_SAMPLE_SECONDS = 0.25
+GPUQ_STABLE_LIST_ARGS = (
+    "list",
+    "--format",
+    "wide",
+    "--io-interval",
+    str(GPUQ_IO_SAMPLE_SECONDS),
+)
 GPUQ_LEGACY_LIST_ARGS = ("list",)
 GPU_QUERY_FIELDS = (
     "index",
@@ -323,6 +331,136 @@ def _gpuq_unavailable(reason: str, message: str) -> dict[str, Any]:
     }
 
 
+def _gpuq_rate(values: dict[str, str], header: str) -> str:
+    value = clean_text(values.get(header, "")).strip()
+    return "" if value in {"", "-", "—"} else value[:40]
+
+
+def _gpuq_cpu_percent(value: str) -> float | None:
+    normalized = clean_text(value).strip().removesuffix("%")
+    percent = _optional_float(normalized)
+    return percent if percent is not None and percent >= 0 else None
+
+
+def _apply_task_cpu_footer(jobs: list[dict[str, Any]], lines: list[str]) -> None:
+    by_id = {job["id"]: job for job in jobs}
+    pattern = re.compile(
+        r"^\s*job(?P<id>\d+)\b.*?:\s*"
+        r"(?P<percent>\d+(?:\.\d+)?)%\s*"
+        r"\((?P<cores>\d+(?:\.\d+)?)\s+cores?\b"
+    )
+    for line in lines:
+        match = pattern.search(line)
+        if match is None:
+            continue
+        job = by_id.get(int(match.group("id")))
+        if job is None:
+            continue
+        job["cpuPercent"] = float(match.group("percent"))
+        job["cpuCores"] = float(match.group("cores"))
+
+
+def _read_process_cpu_table() -> dict[int, tuple[int, int, int]]:
+    """Return PID -> (PPID, user+system CPU ticks, start ticks) from procfs."""
+    processes: dict[int, tuple[int, int, int]] = {}
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        return processes
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = Path(entry.path, "stat").read_bytes()
+                command_end = raw.rfind(b")")
+                fields = raw[command_end + 2 :].split()
+                if command_end < 0 or len(fields) < 20:
+                    continue
+                processes[int(entry.name)] = (
+                    int(fields[1]),
+                    int(fields[11]) + int(fields[12]),
+                    int(fields[19]),
+                )
+            except (OSError, ValueError):
+                continue
+    return processes
+
+
+def _process_tree_pids(
+    processes: dict[int, tuple[int, int, int]],
+    root: int,
+) -> set[int]:
+    children: dict[int, list[int]] = {}
+    for pid, (parent, _cpu_ticks, _start_ticks) in processes.items():
+        children.setdefault(parent, []).append(pid)
+    stack = [root]
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if pid in processes:
+            stack.extend(children.get(pid, ()))
+    return seen
+
+
+def _attach_gpuq_cpu_usage(
+    jobs: list[dict[str, Any]],
+    sample_seconds: float = GPUQ_CPU_SAMPLE_SECONDS,
+) -> None:
+    """Sample CPU for each running job's leader and descendants.
+
+    Linux CPU percent follows the same convention as gwatch: 100% equals one
+    fully occupied logical core, so multi-process jobs can exceed 100%.
+    """
+    targets = [
+        job
+        for job in jobs
+        if job.get("status") == "running"
+        and isinstance(job.get("pid"), int)
+        and job.get("cpuPercent") is None
+    ]
+    if not targets:
+        return
+    before = _read_process_cpu_table()
+    targets = [job for job in targets if job["pid"] in before]
+    if not targets:
+        return
+    before_trees = {job["id"]: _process_tree_pids(before, job["pid"]) for job in targets}
+    sampled_at = time.monotonic()
+    time.sleep(sample_seconds)
+    after = _read_process_cpu_table()
+    elapsed = time.monotonic() - sampled_at
+    if elapsed <= 0:
+        return
+    sysconf = getattr(os, "sysconf", None)
+    if sysconf is None:
+        return
+    try:
+        clock_ticks = sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        return
+    if not isinstance(clock_ticks, int) or clock_ticks <= 0:
+        return
+    for job in targets:
+        root = job["pid"]
+        before_root = before.get(root)
+        after_root = after.get(root)
+        if before_root is None or after_root is None or before_root[2] != after_root[2]:
+            continue
+        shared_pids = before_trees[job["id"]] & _process_tree_pids(after, root)
+        used_ticks = sum(
+            max(0, after[pid][1] - before[pid][1])
+            for pid in shared_pids
+            if pid in before and pid in after
+        )
+        percent = 100.0 * used_ticks / clock_ticks / elapsed
+        job["cpuPercent"] = round(percent, 1)
+        job["cpuCores"] = round(percent / 100.0, 1)
+
+
 def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
     """Parse gpuq's wide or compact active queue output without invoking a shell.
 
@@ -365,6 +503,7 @@ def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
             if job_id is None or gpu_count is None or priority is None:
                 raise ValueError("gpuq list 任务行数字字段无效")
             gpu_indices = values["GPU"].strip()
+            cpu_percent = _gpuq_cpu_percent(values.get("CPU", ""))
             jobs.append(
                 {
                     "id": job_id,
@@ -376,8 +515,15 @@ def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
                     "name": clean_text(values["名称"]).strip()[:200] or f"任务 {job_id}",
                     "waited": values["已等待"].strip(),
                     "running": values["已运行"].strip(),
+                    "diskReadRate": _gpuq_rate(values, "盘读"),
+                    "diskWriteRate": _gpuq_rate(values, "盘写"),
+                    "tcpReceiveRate": _gpuq_rate(values, "TCP收"),
+                    "tcpSendRate": _gpuq_rate(values, "TCP发"),
+                    "cpuPercent": cpu_percent,
+                    "cpuCores": round(cpu_percent / 100.0, 1) if cpu_percent is not None else None,
                 }
             )
+        _apply_task_cpu_footer(jobs, lines)
         return jobs
 
     compact_start = re.compile(r"^[●○]\s*#(?P<id>\d+)\s+(?P<status>\S+)\s{2,}(?P<name>.+)$")
@@ -400,6 +546,12 @@ def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
             "name": clean_text(match.group("name")).strip()[:200] or f"任务 {job_id}",
             "waited": "-",
             "running": "-",
+            "diskReadRate": "",
+            "diskWriteRate": "",
+            "tcpReceiveRate": "",
+            "tcpSendRate": "",
+            "cpuPercent": None,
+            "cpuCores": None,
         }
         index += 1
         while index < len(lines) and compact_start.match(lines[index].strip()) is None:
@@ -408,6 +560,8 @@ def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
             pid = re.search(r"PID:\s*([\d-]+)", detail)
             timing = re.search(r"等待:\s*(\S+).*?运行:\s*(\S+)", detail)
             priority = re.search(r"优先级\s*[:：]?\s*(\d+)", detail)
+            disk = re.search(r"磁盘读取:\s*(\S+).*?磁盘写入:\s*(\S+)", detail)
+            tcp = re.search(r"TCP接收:\s*(\S+).*?TCP发送:\s*(\S+)", detail)
             if gpu:
                 job["gpuIndices"] = "" if gpu.group(1) == "-" else gpu.group(1)
                 job["gpuCount"] = int(gpu.group(2))
@@ -417,9 +571,14 @@ def _parse_gpuq_list(output: str) -> list[dict[str, Any]]:
                 job["waited"], job["running"] = timing.groups()
             if priority:
                 job["priority"] = int(priority.group(1))
+            if disk:
+                job["diskReadRate"], job["diskWriteRate"] = disk.groups()
+            if tcp:
+                job["tcpReceiveRate"], job["tcpSendRate"] = tcp.groups()
             index += 1
         jobs.append(job)
     if jobs:
+        _apply_task_cpu_footer(jobs, lines)
         return jobs
     raise ValueError("gpuq list 表头格式不受支持")
 
@@ -479,6 +638,12 @@ def fetch_gpuq_snapshot() -> dict[str, Any]:
         jobs = _parse_gpuq_list(result.stdout)
     except (TypeError, ValueError) as exc:
         return _gpuq_unavailable("invalid_output", f"无法解析 gpuq list 输出：{exc}")
+    try:
+        _attach_gpuq_cpu_usage(jobs)
+    except Exception:
+        # CPU is optional enrichment.  Never hide valid queue rows when procfs
+        # is unavailable, a process exits mid-sample, or telemetry drifts.
+        pass
     return {
         "available": True,
         "timestamp": utc_iso(),

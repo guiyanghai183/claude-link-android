@@ -351,6 +351,12 @@ class BridgeApi(private val localPort: Int) {
                             name = job.optString("name"),
                             waited = job.optString("waited"),
                             running = job.optString("running"),
+                            diskReadRate = job.optString("diskReadRate"),
+                            diskWriteRate = job.optString("diskWriteRate"),
+                            tcpReceiveRate = job.optString("tcpReceiveRate"),
+                            tcpSendRate = job.optString("tcpSendRate"),
+                            cpuPercent = job.optionalFloat("cpuPercent"),
+                            cpuCores = job.optionalFloat("cpuCores"),
                         )
                     }.orEmpty(),
                 )

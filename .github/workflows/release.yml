@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复扫码接力界面缺少返回入口的问题；扫描画面左上角新增明确的“返回”按钮，系统返回键或返回手势同样会取消扫码并回到 Codex 窗口。" \
+            --arg releaseNotes "算力页新增每条 GPUQ 任务的完整运行明细：GPU 数与编号、PID、磁盘读写、TCP 收发、优先级、等待/运行时长，并按主 PID 与全部子进程展示任务 CPU 百分比和等效逻辑核数。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

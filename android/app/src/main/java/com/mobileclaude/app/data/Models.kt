@@ -131,6 +131,12 @@ data class GpuQueueJob(
     val name: String,
     val waited: String,
     val running: String,
+    val diskReadRate: String,
+    val diskWriteRate: String,
+    val tcpReceiveRate: String,
+    val tcpSendRate: String,
+    val cpuPercent: Float?,
+    val cpuCores: Float?,
 )
 
 data class GpuQueueSnapshot(

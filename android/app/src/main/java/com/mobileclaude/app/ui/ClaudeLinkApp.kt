@@ -2353,7 +2353,11 @@ private fun GpuQueueDetail(snapshot: GpuSnapshot, error: String?, onBack: () -> 
             else -> items(queue.jobs, key = { it.id }) { job -> GpuQueueJobCard(job) }
         }
         error?.let { message -> item { RefreshFailureText(message) } }
-        item { ComputeReadOnlyNote("本页只读调用 gpuq list，不会提交、取消或修改队列任务。") }
+        item {
+            ComputeReadOnlyNote(
+                "本页只读调用 gpuq list；任务 CPU 统计主 PID 与全部子进程，100% 表示占满 1 个逻辑核。不会提交、取消或修改队列任务。"
+            )
+        }
     }
 }
 
@@ -2516,6 +2520,16 @@ private fun GpuQueueJobCard(job: GpuQueueJob) {
         else -> job.status.ifBlank { "未知" }
     }
     val gpuPlacement = if (job.gpuIndices.isBlank()) "待分配" else job.gpuIndices
+    val cpuUsage = when {
+        job.cpuPercent != null -> buildString {
+            append(job.cpuPercent)
+            append('%')
+            job.cpuCores?.let { cores -> append(" · ").append(cores).append(" 核") }
+        }
+        isRunning -> "暂不可用"
+        else -> "待运行"
+    }
+    val unavailableRate = "—"
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = statusColor.copy(alpha = 0.075f),
@@ -2537,22 +2551,81 @@ private fun GpuQueueJobCard(job: GpuQueueJob) {
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.height(5.dp))
-            Text(
-                buildList {
-                    add("GPU $gpuPlacement")
-                    add("申请 ${job.gpuCount} 张")
-                    job.pid?.let { add("PID $it") }
-                }.joinToString(" · "),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 10.sp,
+            Spacer(Modifier.height(9.dp))
+            GpuQueueMetricRow(
+                leftLabel = "GPU / 申请数",
+                leftValue = "$gpuPlacement / ${job.gpuCount} 张",
+                rightLabel = "PID",
+                rightValue = job.pid?.toString() ?: "—",
             )
-            Text(
-                "已等待 ${job.waited.ifBlank { "—" }} · 已运行 ${job.running.ifBlank { "—" }} · 优先级 ${job.priority}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 10.sp,
+            GpuQueueMetricRow(
+                leftLabel = "任务 CPU",
+                leftValue = cpuUsage,
+                rightLabel = "优先级",
+                rightValue = job.priority.toString(),
+                emphasized = true,
+            )
+            GpuQueueMetricRow(
+                leftLabel = "磁盘读取",
+                leftValue = job.diskReadRate.ifBlank { unavailableRate },
+                rightLabel = "磁盘写入",
+                rightValue = job.diskWriteRate.ifBlank { unavailableRate },
+            )
+            GpuQueueMetricRow(
+                leftLabel = "TCP 接收",
+                leftValue = job.tcpReceiveRate.ifBlank { unavailableRate },
+                rightLabel = "TCP 发送",
+                rightValue = job.tcpSendRate.ifBlank { unavailableRate },
+            )
+            GpuQueueMetricRow(
+                leftLabel = "已等待",
+                leftValue = job.waited.ifBlank { "—" },
+                rightLabel = "已运行",
+                rightValue = job.running.ifBlank { "—" },
             )
         }
+    }
+}
+
+@Composable
+private fun GpuQueueMetricRow(
+    leftLabel: String,
+    leftValue: String,
+    rightLabel: String,
+    rightValue: String,
+    emphasized: Boolean = false,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        GpuQueueMetric(leftLabel, leftValue, emphasized, Modifier.weight(1f))
+        GpuQueueMetric(rightLabel, rightValue, false, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun GpuQueueMetric(
+    label: String,
+    value: String,
+    emphasized: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 9.sp,
+            maxLines = 1,
+        )
+        Text(
+            value,
+            color = if (emphasized) NvidiaGreen else MaterialTheme.colorScheme.onSurface,
+            fontWeight = if (emphasized) FontWeight.Bold else FontWeight.Medium,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

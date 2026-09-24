@@ -25,6 +25,7 @@ from mobile_claude_server import (  # noqa: E402
     GPUQ_COMMAND_TIMEOUT_SECONDS,
     ServiceState,
     Store,
+    _attach_gpuq_cpu_usage,
     _fetch_process_metadata,
     _parse_gpuq_list,
     extract_video_handoffs,
@@ -811,10 +812,10 @@ class GpuSnapshotTests(unittest.TestCase):
 
 class GpuqSnapshotTests(unittest.TestCase):
     TABLE = (
-        "ID  状态     GPU数  GPU     PID  优先级  名称                           已等待    已运行\n"
-        "--  -------  -----  ---  ------  ------  -----------------------------  --------  --------\n"
-        "21  running      1  0    424242       0  train-model-s42                00:00:01  05:35:14\n"
-        "33  queued       2  -         -       4  queued  experiment             00:08:09  00:00:00\n"
+        "ID  状态     GPU数  GPU     PID  盘读      盘写    TCP收   TCP发  优先级  名称                           已等待    已运行\n"
+        "--  -------  -----  ---  ------  --------  ------  ------  -----  ------  -----------------------------  --------  --------\n"
+        "21  running      1  0    424242  1.2MiB/s  32KiB/s  8KiB/s  0B/s       0  train-model-s42                00:00:01  05:35:14\n"
+        "33  queued       2  -         -  -         -        -       -           4  queued  experiment             00:08:09  00:00:00\n"
     )
 
     def test_missing_gpuq_is_a_non_fatal_unavailable_state(self):
@@ -846,6 +847,12 @@ class GpuqSnapshotTests(unittest.TestCase):
                     "name": "train-model-s42",
                     "waited": "00:00:01",
                     "running": "05:35:14",
+                    "diskReadRate": "1.2MiB/s",
+                    "diskWriteRate": "32KiB/s",
+                    "tcpReceiveRate": "8KiB/s",
+                    "tcpSendRate": "0B/s",
+                    "cpuPercent": None,
+                    "cpuCores": None,
                 },
                 {
                     "id": 33,
@@ -857,12 +864,25 @@ class GpuqSnapshotTests(unittest.TestCase):
                     "name": "queued  experiment",
                     "waited": "00:08:09",
                     "running": "00:00:00",
+                    "diskReadRate": "",
+                    "diskWriteRate": "",
+                    "tcpReceiveRate": "",
+                    "tcpSendRate": "",
+                    "cpuPercent": None,
+                    "cpuCores": None,
                 },
             ],
         )
         self.assertEqual(
             run.call_args.args[0],
-            ["/home/tester/.local/bin/gpuq", "list", "--format", "wide", "--no-io"],
+            [
+                "/home/tester/.local/bin/gpuq",
+                "list",
+                "--format",
+                "wide",
+                "--io-interval",
+                "0.2",
+            ],
         )
         self.assertEqual(run.call_args.kwargs["timeout"], GPUQ_COMMAND_TIMEOUT_SECONDS)
         self.assertNotIn("shell", run.call_args.kwargs)
@@ -884,6 +904,9 @@ class GpuqSnapshotTests(unittest.TestCase):
         self.assertEqual(jobs[0]["name"], "train  model")
         self.assertEqual(jobs[0]["pid"], 424242)
         self.assertEqual(jobs[0]["running"], "05:35:14")
+        self.assertEqual(jobs[0]["diskReadRate"], "0B/s")
+        self.assertEqual(jobs[0]["cpuPercent"], 1410.8)
+        self.assertEqual(jobs[0]["cpuCores"], 14.1)
 
     def test_compact_cards_with_monitoring_footer_are_supported(self):
         output = (
@@ -891,6 +914,7 @@ class GpuqSnapshotTests(unittest.TestCase):
             "  GPU: 3 / 1张              PID: 529458\n"
             "  等待: 00:00:01            运行: 00:46:11\n"
             "  磁盘读取: 0B/s            磁盘写入: 0B/s\n"
+            "  TCP接收: 16KiB/s          TCP发送: 2KiB/s\n"
             "CPU: 12.0% (11.5/96 cores) | Memory: 130.3GiB/503.5GiB (25.9%)\n"
             "Task CPU (whole process tree, 100% = 1 core):\n"
             "  job119 yanji-6e3f57b617d6-713d814f: 1410.8% (14.1 cores, PID 529458)\n"
@@ -911,16 +935,68 @@ class GpuqSnapshotTests(unittest.TestCase):
                     "name": "yanji-6e3f57b617d6-713d814f",
                     "waited": "00:00:01",
                     "running": "00:46:11",
+                    "diskReadRate": "0B/s",
+                    "diskWriteRate": "0B/s",
+                    "tcpReceiveRate": "16KiB/s",
+                    "tcpSendRate": "2KiB/s",
+                    "cpuPercent": 1410.8,
+                    "cpuCores": 14.1,
                 }
             ],
         )
+
+    def test_running_job_cpu_includes_the_whole_process_tree(self):
+        jobs = [
+            {
+                "id": 21,
+                "status": "running",
+                "pid": 100,
+                "cpuPercent": None,
+                "cpuCores": None,
+            }
+        ]
+        before = {
+            100: (1, 1000, 50),
+            101: (100, 200, 60),
+            999: (1, 9000, 70),
+        }
+        after = {
+            100: (1, 1030, 50),
+            101: (100, 220, 60),
+            999: (1, 9999, 70),
+        }
+        with (
+            patch("mobile_claude_server._read_process_cpu_table", side_effect=[before, after]),
+            patch("mobile_claude_server.time.monotonic", side_effect=[10.0, 10.5]),
+            patch("mobile_claude_server.time.sleep") as sleep,
+            patch("mobile_claude_server.os.sysconf", return_value=100, create=True),
+        ):
+            _attach_gpuq_cpu_usage(jobs, sample_seconds=0.1)
+
+        sleep.assert_called_once_with(0.1)
+        self.assertEqual(jobs[0]["cpuPercent"], 100.0)
+        self.assertEqual(jobs[0]["cpuCores"], 1.0)
+
+    def test_cpu_sampling_failure_does_not_hide_queue_rows(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=self.TABLE, stderr="")
+        with (
+            patch("mobile_claude_server._find_gpuq", return_value="/home/tester/.local/bin/gpuq"),
+            patch("mobile_claude_server.subprocess.run", return_value=completed),
+            patch("mobile_claude_server._attach_gpuq_cpu_usage", side_effect=RuntimeError("procfs drift")),
+        ):
+            result = fetch_gpuq_snapshot()
+
+        self.assertTrue(result["available"])
+        self.assertEqual([job["id"] for job in result["jobs"]], [21, 33])
+        self.assertEqual(result["jobs"][0]["diskReadRate"], "1.2MiB/s")
+        self.assertIsNone(result["jobs"][0]["cpuPercent"])
 
     def test_legacy_gpuq_fallback_when_stable_flags_are_unsupported(self):
         unsupported = subprocess.CompletedProcess(
             [],
             2,
             stdout="",
-            stderr="gpuq: error: unrecognized arguments: --format wide --no-io\n",
+            stderr="gpuq: error: unrecognized arguments: --format wide --io-interval 0.2\n",
         )
         completed = subprocess.CompletedProcess([], 0, stdout=self.TABLE, stderr="")
         with (
@@ -934,7 +1010,14 @@ class GpuqSnapshotTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
-                ["/home/tester/.local/bin/gpuq", "list", "--format", "wide", "--no-io"],
+                [
+                    "/home/tester/.local/bin/gpuq",
+                    "list",
+                    "--format",
+                    "wide",
+                    "--io-interval",
+                    "0.2",
+                ],
                 ["/home/tester/.local/bin/gpuq", "list"],
             ],
         )
