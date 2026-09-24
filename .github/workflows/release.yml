@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复算力模块在 gpuq list 增加 CPU/I/O 列或监控摘要后无法显示任务详情的问题，并兼容宽表与紧凑卡片输出；Codex 页面新增扫码接力，可预览并恢复本机原会话或按摘要创建新会话。" \
+            --arg releaseNotes "修复 v0.3.28 中 Codex 窗口因 tmux 未继承 CODEX_BIN 而创建后立即退出、显示 can't find session 的问题；保留 GPUQ CPU/I/O 输出兼容和扫码接力功能。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

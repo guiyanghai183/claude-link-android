@@ -37,6 +37,54 @@ import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.util.UUID
 
+private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
+
+internal fun buildCodexLaunchCommand(resumeSessionId: String?, prompt: String?): String = when {
+    resumeSessionId != null && prompt != null -> {
+        val sessionPattern = "*$resumeSessionId*.jsonl"
+        "if [ -d \"\$HOME/.codex/sessions\" ] && " +
+            "find \"\$HOME/.codex/sessions\" -type f -name ${shellQuote(sessionPattern)} " +
+            "-print -quit 2>/dev/null | grep -q .; then " +
+            "exec \"\$CODEX_BIN\" resume ${shellQuote(resumeSessionId)} ${shellQuote(prompt)}; " +
+            "else exec \"\$CODEX_BIN\" ${shellQuote(prompt)}; fi"
+    }
+    resumeSessionId != null -> "exec \"\$CODEX_BIN\" resume ${shellQuote(resumeSessionId)}"
+    prompt != null -> "exec \"\$CODEX_BIN\" ${shellQuote(prompt)}"
+    else -> "exec \"\$CODEX_BIN\""
+}
+
+internal fun buildCodexTmuxStartupCommand(
+    initialDirectory: String,
+    tmuxName: String,
+    launchCommand: String,
+    captureHistoryRows: Int,
+): String =
+    "stty -echo; printf '\\033[2J\\033[H'; " +
+        "cd -- ${shellQuote(initialDirectory)} || { " +
+        "printf 'Codex: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
+        "TMUX_BIN=/usr/bin/tmux; " +
+        "[ -x \"\$TMUX_BIN\" ] || TMUX_BIN=\"\$(type -P tmux)\"; " +
+        "[ -n \"\$TMUX_BIN\" ] || { " +
+        "printf 'Codex 窗口需要服务器安装 tmux\\n' >&2; exit 127; }; " +
+        "CODEX_BIN=\"\$(type -P codex)\"; " +
+        "[ -n \"\$CODEX_BIN\" ] || { " +
+        "printf '服务器尚未安装 Codex CLI\\n' >&2; exit 127; }; " +
+        "CODEX_LAUNCH=${shellQuote(launchCommand)}; " +
+        "export TERM=xterm-256color; " +
+        "run_tmux() { env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" \"\$@\"; }; " +
+        "if run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null; then " +
+        "run_tmux capture-pane -p -S -$captureHistoryRows " +
+        "-t ${shellQuote(tmuxName)} 2>/dev/null || true; " +
+        "else run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
+        "-c ${shellQuote(initialDirectory)} " +
+        "\"CODEX_BIN=\$CODEX_BIN; export CODEX_BIN; \$CODEX_LAUNCH\" || { " +
+        "printf 'Codex 窗口创建失败\\n' >&2; exit 1; }; fi; " +
+        "run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null || { " +
+        "printf 'Codex 进程启动后立即退出，请检查服务器 Codex CLI\\n' >&2; exit 1; }; " +
+        "run_tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
+        "exec env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" " +
+        "attach-session -t ${shellQuote(tmuxName)}"
+
 data class TunnelConnection(
     val profile: ServerProfile,
     val localPort: Int,
@@ -225,41 +273,15 @@ class SshTunnelManager(
         require(prompt == null || prompt.length <= MAX_CODEX_HANDOFF_PROMPT_CHARS) {
             "Codex 接力摘要过长"
         }
-        val launchCommand = when {
-            resumeSessionId != null && prompt != null -> {
-                val sessionPattern = "*$resumeSessionId*.jsonl"
-                "if [ -d \"\$HOME/.codex/sessions\" ] && " +
-                    "find \"\$HOME/.codex/sessions\" -type f -name ${shellQuote(sessionPattern)} " +
-                    "-print -quit 2>/dev/null | grep -q .; then " +
-                    "exec \"\$CODEX_BIN\" resume ${shellQuote(resumeSessionId)} ${shellQuote(prompt)}; " +
-                    "else exec \"\$CODEX_BIN\" ${shellQuote(prompt)}; fi"
-            }
-            resumeSessionId != null -> "exec \"\$CODEX_BIN\" resume ${shellQuote(resumeSessionId)}"
-            prompt != null -> "exec \"\$CODEX_BIN\" ${shellQuote(prompt)}"
-            else -> "exec \"\$CODEX_BIN\""
-        }
+        val launchCommand = buildCodexLaunchCommand(resumeSessionId, prompt)
         val tmuxName = codexTmuxName(windowId)
         return openShell(initialDirectory, columns, rows) {
-            "stty -echo; printf '\\033[2J\\033[H'; " +
-                "cd -- ${shellQuote(initialDirectory)} || { " +
-                "printf 'Codex: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
-                "TMUX_BIN=/usr/bin/tmux; " +
-                "[ -x \"\$TMUX_BIN\" ] || TMUX_BIN=\"\$(type -P tmux)\"; " +
-                "[ -n \"\$TMUX_BIN\" ] || { " +
-                "printf 'Codex 窗口需要服务器安装 tmux\\n' >&2; exit 127; }; " +
-                "CODEX_BIN=\"\$(type -P codex)\"; " +
-                "[ -n \"\$CODEX_BIN\" ] || { " +
-                "printf '服务器尚未安装 Codex CLI\\n' >&2; exit 127; }; " +
-                "export CODEX_BIN TERM=xterm-256color; " +
-                "run_tmux() { env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" \"\$@\"; }; " +
-                "if run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null; then " +
-                "run_tmux capture-pane -p -S -$CODEX_CAPTURE_HISTORY_ROWS " +
-                "-t ${shellQuote(tmuxName)} 2>/dev/null || true; " +
-                "else run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
-                "-c ${shellQuote(initialDirectory)} ${shellQuote(launchCommand)}; fi; " +
-                "run_tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
-                "exec env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" " +
-                "attach-session -t ${shellQuote(tmuxName)}"
+            buildCodexTmuxStartupCommand(
+                initialDirectory = initialDirectory,
+                tmuxName = tmuxName,
+                launchCommand = launchCommand,
+                captureHistoryRows = CODEX_CAPTURE_HISTORY_ROWS,
+            )
         }
     }
 
@@ -572,8 +594,6 @@ class SshTunnelManager(
     private fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { "%02x".format(it) }
-
-    private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
 
     private fun codexTmuxName(windowId: String): String {
         val suffix = windowId.filter(Char::isLetterOrDigit).lowercase().take(24)
