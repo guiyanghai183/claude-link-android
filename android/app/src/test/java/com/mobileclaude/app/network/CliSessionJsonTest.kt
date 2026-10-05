@@ -55,4 +55,11 @@ class CliSessionJsonTest {
     @Test fun realWindowBindingIsPreservedForReconnect() {
         assertEquals("window-1", api.parseCliSession(history().put("windowId", "window-1")).windowId)
     }
+
+    @Test fun sharedTerminalTargetPreservesRealBindingsAndHandlesAndroidNull() {
+        val target = "claude-link-qodercn-" + "a".repeat(24)
+        assertEquals(target, api.parseChat(window().put("sharedTerminalTarget", target)).sharedTerminalTarget)
+        assertNull(api.parseChat(window().put("sharedTerminalTarget", JSONObject.NULL)).sharedTerminalTarget)
+        assertNull(api.parseChat(window()).sharedTerminalTarget)
+    }
 }

@@ -18,6 +18,7 @@ import mimetypes
 import os
 import re
 import selectors
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.33"
+APP_VERSION = "0.3.34"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -703,21 +704,39 @@ def prepare_user_prompt(text: str, attachments: list[Any]) -> tuple[str, list[di
     return combined, safe_attachments
 
 
-def active_cli_sessions(mode: str, proc_root: Path = Path("/proc")) -> dict[str, str]:
-    """Map this user's live conversation IDs to terminals; never expose arguments."""
-    active: dict[str, str] = {}
+def live_cli_terminals(mode: str, proc_root: Path = Path("/proc")) -> dict[str, dict[str, Any]]:
+    """Identify interactive processes, including sessions without a saved first turn."""
+    active: dict[str, dict[str, Any]] = {}
     if not proc_root.is_dir() or not hasattr(os, "getuid"):
         return active
+    boot = 0.0
+    ticks = 100
+    with contextlib.suppress(OSError, StopIteration, ValueError, AttributeError):
+        boot = float(next(line.split()[1] for line in (proc_root / "stat").read_text().splitlines()
+                          if line.startswith("btime ")))
+        ticks = os.sysconf("SC_CLK_TCK")
     for process in proc_root.iterdir():
         try:
             if not process.name.isdigit() or process.stat().st_uid != os.getuid():
                 continue
             command = (process / "comm").read_text().strip()
             prefix = "qoderclicn" if mode == "qodercn" else "codex"
-            if not command.startswith(prefix):
+            args = (process / "cmdline").read_bytes().decode(errors="replace").split("\0")
+            entry = Path(args[1]).name if len(args) > 1 else ""
+            node_cli = command == "node" and re.fullmatch(
+                r"(?:qodercn|qoderclicn)(?:\.[cm]?js)?" if mode == "qodercn" else r"codex(?:\.[cm]?js)?", entry)
+            if not command.startswith(prefix) and not node_cli:
+                continue
+            terminal = os.readlink(process / "fd" / "0")
+            if not re.fullmatch(r"/dev/pts/[0-9]+", terminal):
                 continue
             process_sessions: set[str] = set()
-            args = (process / "cmdline").read_bytes().decode(errors="replace").split("\0")
+            noninteractive = {"exec", "app-server", "--print", "remote-control", "--remote-control"}
+            if mode == "qodercn":
+                noninteractive.add("-p")
+            if any(arg in noninteractive
+                   for arg in args[1:]):
+                continue
             for index, arg in enumerate(args[:-1]):
                 if arg in {"--session-id", "--resume", "-r", "resume"}:
                     with contextlib.suppress(ValueError):
@@ -732,14 +751,49 @@ def active_cli_sessions(mode: str, proc_root: Path = Path("/proc")) -> dict[str,
                     if match:
                         with contextlib.suppress(ValueError):
                             process_sessions.add(str(uuid.UUID(match.group(1))))
-            terminal = ""
+            start = ""
+            sid = ""
+            with contextlib.suppress(OSError, IndexError):
+                fields = (process / "stat").read_text().rpartition(")")[2].split()
+                start, sid = fields[19], fields[3]
+            project = ""
             with contextlib.suppress(OSError):
-                terminal = os.readlink(process / "fd" / "0")
+                project = os.readlink(process / "cwd")
+            for index, arg in enumerate(args[:-1]):
+                if arg in ({"--cwd"} if mode == "qodercn" else {"-C", "--cd"}):
+                    candidate = Path(args[index + 1])
+                    if candidate.is_absolute():
+                        project = str(candidate)
+            known = bool(process_sessions)
+            if not known:
+                # A new Codex terminal may not have opened its rollout file yet.
+                process_sessions.add(str(uuid.uuid5(uuid.NAMESPACE_URL,
+                    f"claude-link-live:{mode}:{process.name}:{start}:{terminal}")))
             for session_id in process_sessions:
-                active.setdefault(session_id, terminal)
+                item = {
+                    "pid": int(process.name), "start": start, "terminal": terminal, "sid": sid,
+                    "projectPath": project, "updated": process.stat().st_mtime,
+                    "knownSession": known, "native": not bool(node_cli),
+                    "startedAt": boot + int(start) / ticks if boot and start.isdigit() else process.stat().st_mtime,
+                    "resuming": any(arg in {"resume", "--resume", "-r", "--continue"} for arg in args[1:]),
+                }
+                previous = active.get(session_id)
+                if previous is None or (known, item["native"]) > (previous["knownSession"], previous["native"]):
+                    active[session_id] = item
         except (OSError, ValueError):
             continue
-    return active
+    # npm's native Codex launcher and its child share one PTY. Prefer the
+    # process with the real session file, rather than listing two terminals.
+    terminals: dict[str, dict[str, Any]] = {}
+    for item in active.values():
+        previous = terminals.get(item["terminal"])
+        if previous is None or (item["knownSession"], item["native"]) > (previous["knownSession"], previous["native"]):
+            terminals[item["terminal"]] = item
+    return {key: item for key, item in active.items() if terminals[item["terminal"]]["pid"] == item["pid"]}
+
+
+def active_cli_sessions(mode: str, proc_root: Path = Path("/proc")) -> dict[str, str]:
+    return {key: item["terminal"] for key, item in live_cli_terminals(mode, proc_root).items()}
 
 
 def active_cli_session_ids(mode: str, proc_root: Path = Path("/proc")) -> set[str]:
@@ -760,7 +814,9 @@ def cli_tmux_window_ids(chats: list[dict[str, Any]], mode: str) -> dict[str, str
     env.pop("LD_LIBRARY_PATH", None)
     try:
         result = subprocess.run(
-            [executable, "list-panes", "-a", "-F", "#{session_name}\t#{pane_tty}"],
+            [executable, "list-panes", "-a", "-F",
+             "#{session_name}\t#{pane_tty}\t#{@claude_link_source_tty}\t"
+             "#{@claude_link_source_pid}\t#{@claude_link_source_start}\t#{pane_dead}"],
             env=env, capture_output=True, text=True, timeout=3, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -768,15 +824,24 @@ def cli_tmux_window_ids(chats: list[dict[str, Any]], mode: str) -> dict[str, str
     if result.returncode != 0:
         return {}
     terminals = {}
+    live = live_cli_terminals(mode)
+    identities = {(str(item["pid"]), item["start"], item["terminal"]) for item in live.values()}
     for line in result.stdout.splitlines():
-        name, separator, terminal = line.partition("\t")
+        columns = line.split("\t")
+        if len(columns) < 2:
+            continue
+        if len(columns) >= 6 and columns[5] != "0":
+            continue
+        name, terminal = columns[:2]
         match = re.fullmatch(rf"claude-link-{mode}-([a-f0-9]{{24}})", name)
-        if separator and match and name not in names:
+        if match and name not in names:
             # Re-register an app-owned tmux window whose old database row was lost.
             # The first 24 UUID hex digits reproduce its exact existing tmux name.
             names[name] = str(uuid.UUID(hex=match.group(1) + "00000000"))
-        if separator and name in names:
+        if name in names:
             terminals[terminal] = names[name]
+            if len(columns) >= 5 and (columns[3], columns[4], columns[2]) in identities:
+                terminals[columns[2]] = names[name]
     return {session_id: terminals[terminal] for session_id, terminal in active.items()
             if terminal in terminals}
 
@@ -808,8 +873,6 @@ def discover_cli_sessions(mode: str, home: Path | None = None) -> list[dict[str,
     titles = codex_session_titles(home) if mode == "codex" else {}
     folder = ".qoder-cn/projects" if mode == "qodercn" else ".codex/sessions"
     root = (home / folder).resolve()
-    if not root.is_dir():
-        return []
     candidates: list[tuple[float, Path]] = []
     pattern = "*/*.jsonl" if mode == "qodercn" else "*/*/*/*.jsonl"
     for path in root.glob(pattern):
@@ -900,7 +963,184 @@ def discover_cli_sessions(mode: str, home: Path | None = None) -> list[dict[str,
                 break
         except (OSError, ValueError):
             continue
-    return list(sessions.values())
+    live = live_cli_terminals(mode)
+    label = "Qoder CN" if mode == "qodercn" else "Codex"
+    for session_id, terminal in live.items():
+        if session_id in sessions:
+            sessions[session_id]["running"] = True
+        elif Path(terminal["projectPath"]).is_absolute():
+            sessions[session_id] = {
+                "id": session_id, "mode": mode,
+                "title": f"{label} · 正在使用的终端 {Path(terminal['terminal']).name}",
+                "projectPath": terminal["projectPath"],
+                "updatedAt": utc_iso(terminal["updated"]), "preview": "", "running": True,
+            }
+    return sorted(sessions.values(), key=lambda item: (item["running"], item["updatedAt"]),
+                  reverse=True)[:MAX_CLI_SESSIONS]
+
+
+def validate_live_terminal(mode: str, pid: int, start: str, terminal: str) -> dict[str, Any]:
+    """Recheck identity immediately before any terminal transfer; never accept client PIDs."""
+    if not start.isdigit() or not re.fullmatch(r"/dev/pts/[0-9]+", terminal):
+        raise ChatBusyError("终端身份不完整，请刷新会话列表")
+    for item in live_cli_terminals(mode).values():
+        if item["pid"] == pid and item["start"] == start and item["terminal"] == terminal:
+            return item
+    raise ChatBusyError("原终端已退出或发生变化，请刷新后重试")
+
+
+def tmux_command(*args: str) -> subprocess.CompletedProcess[str]:
+    executable = shutil.which("tmux")
+    if not executable:
+        raise FileNotFoundError("服务器需要安装 tmux 才能共享终端")
+    env = dict(os.environ)
+    env.pop("LD_LIBRARY_PATH", None)
+    return subprocess.run([executable, *args], env=env, capture_output=True,
+                          text=True, timeout=4, check=False)
+
+
+def reptyr_target(source: dict[str, Any]) -> int:
+    """Transfer via the owning shell/npm launcher, preserving every CLI child."""
+    sid = source.get("sid", "")
+    if not sid.isdigit() or int(sid) == source["pid"]:
+        return source["pid"]
+    leader = Path("/proc") / sid
+    try:
+        if leader.stat().st_uid != os.getuid() or os.readlink(leader / "fd" / "0") != source["terminal"]:
+            raise ChatBusyError("原终端的启动器不属于当前 SSH 用户，无法接入")
+        return int(sid)
+    except OSError as exc:
+        raise ChatBusyError("原终端启动器已退出，请刷新后重试") from exc
+
+
+def attach_live_cli_terminal(mode: str, session_id: str, window_id: str) -> str:
+    """Share an existing tmux pane, or transfer an SSH PTY without restarting its CLI."""
+    source = live_cli_terminals(mode).get(session_id)
+    if source is None:
+        raise ChatBusyError("原终端已退出，请刷新后恢复对话")
+    validate_live_terminal(mode, source["pid"], source["start"], source["terminal"])
+    target = f"claude-link-{mode}-{uuid.UUID(window_id).hex[:24]}"
+    panes = tmux_command("list-panes", "-a", "-F",
+        "#{session_name}\t#{pane_tty}\t#{window_id}\t#{pane_id}\t#{@claude_link_source_tty}\t"
+        "#{@claude_link_source_pid}\t#{@claude_link_source_start}\t#{pane_dead}")
+    # Grouped tmux sessions list the desktop pane and the phone alias with
+    # the same PTY. Prefer our existing alias before creating another group.
+    pane_lines = panes.stdout.splitlines()
+    pane_lines.sort(key=lambda line: line.split("\t", 1)[0] != target)
+    for line in pane_lines:
+        fields = line.split("\t")
+        if len(fields) < 4:
+            continue
+        if len(fields) >= 8 and fields[7] != "0":
+            continue
+        name, tty, window, pane = fields[:4]
+        transferred = len(fields) >= 7 and fields[4:7] == [source["terminal"], str(source["pid"]), source["start"]]
+        if tty != source["terminal"] and not transferred:
+            continue
+        if name == target:
+            if tmux_command("show-option", "-qv", "-t", target,
+                            "@claude_link_attach_pending").stdout.strip() == "1":
+                wait_for_terminal_attachment(target)
+            return target
+        if not re.fullmatch(r"@[0-9]+", window) or not re.fullmatch(r"%[0-9]+", pane):
+            raise ChatBusyError("服务器窗口信息已变化，请重试")
+        # A grouped session shares the original windows and processes. It does
+        # not create a second CLI or take the desktop client off its connection.
+        result = tmux_command("new-session", "-d", "-s", target, "-t", name)
+        if result.returncode:
+            raise ChatBusyError(result.stderr.strip()[:500] or "共享窗口创建失败")
+        tmux_command("select-window", "-t", target + ":" + window)
+        tmux_command("select-pane", "-t", pane)
+        tmux_command("set-option", "-t", target, "@claude_link_source_tty", source["terminal"])
+        tmux_command("set-option", "-t", target, "@claude_link_source_pid", str(source["pid"]))
+        tmux_command("set-option", "-t", target, "@claude_link_source_start", source["start"])
+        return target
+    reptyr = shutil.which("reptyr")
+    if not reptyr:
+        raise ChatBusyError("普通 SSH 终端接入需要服务器安装 reptyr；已有 tmux 窗口可直接共享")
+    if os.getuid() != 0:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            raise ChatBusyError("普通 SSH 终端接入需要服务器允许 sudo -n reptyr")
+        check = subprocess.run([sudo, "-n", "-l", reptyr, "-T", "-V", str(reptyr_target(source))],
+                               capture_output=True, text=True, timeout=3, check=False)
+        if check.returncode:
+            raise ChatBusyError("服务器未允许免密终端接入；原终端保持运行")
+    executable = shutil.which("tmux")
+    launch = shlex.join([sys.executable, str(Path(__file__).resolve()), "--attach-terminal",
+                        str(source["pid"]), "--attach-start", source["start"],
+                        "--attach-tty", source["terminal"], "--attach-mode", mode,
+                        "--attach-target", target])
+    command = (shlex.join(["env", "-u", "LD_LIBRARY_PATH", executable, "set-option",
+                          "-w", "-t", target, "remain-on-exit", "on"]) + "; exec " + launch)
+    result = tmux_command("new-session", "-d", "-s", target, "-c", source["projectPath"], command)
+    if result.returncode:
+        raise ChatBusyError(result.stderr.strip()[:500] or "终端接入窗口创建失败")
+    tmux_command("set-option", "-t", target, "@claude_link_attach_pending", "1")
+    tmux_command("set-option", "-t", target, "@claude_link_source_tty", source["terminal"])
+    tmux_command("set-option", "-t", target, "@claude_link_source_pid", str(source["pid"]))
+    tmux_command("set-option", "-t", target, "@claude_link_source_start", source["start"])
+    wait_for_terminal_attachment(target)
+    tmux_command("resize-window", "-t", "=" + target, "-x", "81", "-y", "24")
+    tmux_command("resize-window", "-t", "=" + target, "-x", "80", "-y", "24")
+    tmux_command("set-option", "-w", "-t", target, "window-size", "latest")
+    return target
+
+
+def wait_for_terminal_attachment(target: str) -> None:
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        status = tmux_command("list-panes", "-t", "=" + target, "-F",
+                              "#{pane_dead}\t#{@claude_link_attach_ready}")
+        if status.returncode or status.stdout.startswith("1"):
+            screen = tmux_command("capture-pane", "-p", "-t", "=" + target)
+            # Only remove a failed, dead proxy. A pending transfer stays intact.
+            tmux_command("kill-session", "-t", "=" + target)
+            raise ChatBusyError((screen.stdout.strip() or "终端接入失败，原终端保持运行")[-600:])
+        if status.stdout.strip() == "0\t1":
+            tmux_command("set-option", "-t", target, "@claude_link_attach_pending", "0")
+            return
+        time.sleep(0.15)
+    raise ChatBusyError("终端仍在接入中，请保持原 SSH 连接，稍后重新接入")
+
+
+def run_terminal_attachment(mode: str, pid: int, start: str, terminal: str, target: str) -> int:
+    source = validate_live_terminal(mode, pid, start, terminal)
+    if not re.fullmatch(rf"claude-link-{mode}-[a-f0-9]{{24}}", target):
+        raise ValueError("共享终端标识无效")
+    executable = shutil.which("reptyr")
+    if not executable:
+        raise FileNotFoundError("服务器未安装 reptyr")
+    command = [executable, "-T", "-V", str(reptyr_target(source))]
+    if os.getuid() != 0:
+        command = [shutil.which("sudo") or "/usr/bin/sudo", "-n", *command]
+    env = dict(os.environ)
+    env.pop("LD_LIBRARY_PATH", None)
+    # Consume reptyr's diagnostic channel privately. An alive proxy process
+    # alone does not mean it has acquired the original PTY and blocked HUP.
+    process = subprocess.Popen(command, env=env, stderr=subprocess.PIPE, text=True)
+    errors: list[str] = []
+    assert process.stderr is not None
+    for line in process.stderr:
+        if "Got tty fd:" in line:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    status = (Path("/proc") / source["sid"] / "status").read_text()
+                    ignored = next(row.split()[1] for row in status.splitlines() if row.startswith("SigIgn:"))
+                    if int(ignored, 16) & 1:
+                        tmux_command("set-option", "-t", target, "@claude_link_attach_ready", "1")
+                        break
+                except (OSError, StopIteration, ValueError):
+                    pass
+                time.sleep(0.05)
+        elif not line.startswith("[+]"):
+            errors.append(line.strip())
+            errors = errors[-8:]
+    code = process.wait()
+    if code:
+        print("\n".join(errors)[-1500:] or f"终端接入工具退出（{code}）", flush=True)
+    return code
 
 
 class Store:
@@ -989,6 +1229,8 @@ class Store:
                 conn.execute("ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'claude'")
             if "cli_session_id" not in chat_columns:
                 conn.execute("ALTER TABLE chats ADD COLUMN cli_session_id TEXT")
+            if "cli_terminal_target" not in chat_columns:
+                conn.execute("ALTER TABLE chats ADD COLUMN cli_terminal_target TEXT")
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_cli_session "
                 "ON chats(mode,cli_session_id) WHERE cli_session_id IS NOT NULL "
@@ -1091,6 +1333,17 @@ class Store:
             )
             conn.commit()
             return len(chat_ids)
+
+    def share_cli_terminal(self, chat_id: str, target: str) -> dict[str, Any]:
+        chat = self.get_chat(chat_id)
+        if chat["mode"] not in CLI_WINDOW_MODES or not re.fullmatch(
+                rf"claude-link-{chat['mode']}-[a-f0-9]{{24}}", target):
+            raise ValueError("共享终端标识无效")
+        with self._write_lock:
+            conn = self.connection()
+            conn.execute("UPDATE chats SET cli_terminal_target=? WHERE id=?", (target, chat_id))
+            conn.commit()
+        return self.get_chat(chat_id)
 
     def create_chat(
         self,
@@ -1234,6 +1487,7 @@ class Store:
             "projectPath": row["project_path"],
             "mode": row["mode"] if "mode" in keys else "claude",
             "cliSessionId": row["cli_session_id"] if "cli_session_id" in keys else None,
+            "sharedTerminalTarget": row["cli_terminal_target"] if "cli_terminal_target" in keys else None,
             "createdAt": utc_iso(row["created_at"]),
             "updatedAt": utc_iso(row["updated_at"]),
             "pinned": bool(row["pinned"]),
@@ -2496,6 +2750,7 @@ class ServiceState:
         self.claude = ClaudeManager(self.store, claude_command)
         self.started_at = now_ts()
         self._gpu_lock = threading.Lock()
+        self._cli_attach_lock = threading.RLock()
         self._gpu_cached_at = 0.0
         self._gpu_cached_snapshot: dict[str, Any] | None = None
         self.cleanup_expired()
@@ -2509,6 +2764,99 @@ class ServiceState:
         })
         return [dict(session, windowId=windows.get(session["id"]))
                 for session in discover_cli_sessions(mode)]
+
+    def create_chat(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self._cli_attach_lock:
+            project = self.validate_project(str(body.get("projectPath") or Path.home()))
+            mode = str(body.get("mode") or "claude").strip().lower()
+            if mode not in CHAT_MODES:
+                raise ValueError("对话类型必须是 claude、terminal、codex 或 qodercn")
+            resume_id = body.get("resumeSessionId")
+            resume = None
+            if resume_id is not None:
+                if mode not in CLI_WINDOW_MODES:
+                    raise ValueError("只有命令行窗口支持恢复会话")
+                try:
+                    resume_id = str(uuid.UUID(str(resume_id)))
+                except ValueError as exc:
+                    raise ValueError("resumeSessionId 必须是 UUID") from exc
+                resume = next((item for item in self.cli_sessions(mode) if item["id"] == resume_id), None)
+                if resume is None:
+                    raise FileNotFoundError("会话记录已不存在，请刷新列表")
+                if resume["windowId"]:
+                    with contextlib.suppress(KeyError):
+                        return self.prepare_cli_window(resume["windowId"])
+                if not resume["running"]:
+                    self.verify_cli_session_idle(mode, resume)
+                project = self.validate_project(resume["projectPath"])
+            raw_id = str((resume or {}).get("windowId") or body.get("clientChatId") or uuid.uuid4())
+            try:
+                chat_id = str(uuid.UUID(raw_id))
+            except ValueError as exc:
+                raise ValueError("clientChatId 必须是 UUID") from exc
+            previous_ids = {chat["id"] for chat in self.store.list_chats()}
+            chat = self.store.create_chat(
+                project, str(body.get("title") or (resume["title"] if resume else
+                    "新终端" if mode == "terminal" else "Codex" if mode == "codex" else "新对话")),
+                chat_id=chat_id, mode=mode, cli_session_id=resume_id,
+            )
+            if resume and resume["running"]:
+                try:
+                    target = attach_live_cli_terminal(mode, resume_id, chat["id"])
+                    chat = self.store.share_cli_terminal(chat["id"], target)
+                except Exception:
+                    if chat["id"] not in previous_ids:
+                        self.store.delete_chat(chat["id"])
+                    raise
+            elif resume:
+                # Close the discovery/registration race before Android can
+                # resume a history which became active after listing it.
+                if resume_id in active_cli_session_ids(mode):
+                    if chat["id"] not in previous_ids:
+                        self.store.delete_chat(chat["id"])
+                    raise ChatBusyError("会话刚在其他终端启动，请刷新后接入")
+                try:
+                    self.verify_cli_session_idle(mode, resume)
+                except ChatBusyError:
+                    if chat["id"] not in previous_ids:
+                        self.store.delete_chat(chat["id"])
+                    raise
+            return chat
+
+    def verify_cli_session_idle(self, mode: str, session: dict[str, Any]) -> None:
+        # Some CLIs close rollout files between writes or assign an ID only
+        # after the first message. Never guess which live terminal owns a
+        # recently written history and accidentally launch a second writer.
+        modified = dt.datetime.fromisoformat(session["updatedAt"].replace("Z", "+00:00")).timestamp()
+        for source in live_cli_terminals(mode).values():
+            if (not source.get("knownSession", True)
+                    and source["projectPath"] == session["projectPath"]
+                    and (source.get("resuming") or modified >= source["startedAt"] - 2)):
+                raise ChatBusyError("该项目有编号尚未确认的运行中终端，请从‘正在使用的终端’入口接入")
+
+    def prepare_cli_window(self, chat_id: str) -> dict[str, Any]:
+        with self._cli_attach_lock:
+            chat = self.store.get_chat(chat_id)
+            if chat["mode"] not in CLI_WINDOW_MODES:
+                raise ValueError("只有命令行窗口支持终端接入")
+            session_id = chat["cliSessionId"]
+            if session_id and session_id in live_cli_terminals(chat["mode"]):
+                owned = cli_tmux_window_ids([chat], chat["mode"])
+                if owned.get(session_id) != chat_id:
+                    target = attach_live_cli_terminal(chat["mode"], session_id, chat_id)
+                    return self.store.share_cli_terminal(chat_id, target)
+                target = f"claude-link-{chat['mode']}-{uuid.UUID(chat_id).hex[:24]}"
+                if tmux_command("show-option", "-qv", "-t", target,
+                                "@claude_link_attach_pending").stdout.strip() == "1":
+                    wait_for_terminal_attachment(target)
+            elif session_id and not chat["sharedTerminalTarget"]:
+                owned = cli_tmux_window_ids([chat], chat["mode"])
+                if chat_id not in owned.values():
+                    session = next((item for item in discover_cli_sessions(chat["mode"])
+                                    if item["id"] == session_id), None)
+                    if session:
+                        self.verify_cli_session_idle(chat["mode"], session)
+            return chat
 
     def gpu_snapshot(self) -> dict[str, Any]:
         """Coalesce concurrent dashboard refreshes and briefly reuse the last sample."""
@@ -2874,50 +3222,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             parts, _ = self._route()
             body = self._json_body()
             if parts == ["v1", "chats"]:
-                project = self.state.validate_project(str(body.get("projectPath") or Path.home()))
-                mode = str(body.get("mode") or "claude").strip().lower()
-                if mode not in CHAT_MODES:
-                    raise ValueError("对话类型必须是 claude、terminal、codex 或 qodercn")
-                resume_id = body.get("resumeSessionId")
-                resume = None
-                if resume_id is not None:
-                    if mode not in CLI_WINDOW_MODES:
-                        raise ValueError("只有命令行窗口支持恢复会话")
-                    try:
-                        resume_id = str(uuid.UUID(str(resume_id)))
-                    except ValueError as exc:
-                        raise ValueError("resumeSessionId 必须是 UUID") from exc
-                    resume = next((item for item in self.state.cli_sessions(mode)
-                                   if item["id"] == resume_id), None)
-                    if resume is None:
-                        raise FileNotFoundError("会话记录已不存在，请刷新列表")
-                    if resume["windowId"]:
-                        try:
-                            existing = self.state.store.get_chat(resume["windowId"])
-                        except KeyError:
-                            existing = None
-                        if existing is not None:
-                            self._send_json(HTTPStatus.CREATED, existing)
-                            return
-                    if resume["running"] and not resume["windowId"]:
-                        raise ChatBusyError("该会话正在其他终端使用，暂时无法恢复")
-                    project = self.state.validate_project(resume["projectPath"])
-                raw_chat_id = str((resume or {}).get("windowId") or body.get("clientChatId") or uuid.uuid4())
-                try:
-                    client_chat_id = str(uuid.UUID(raw_chat_id))
-                except ValueError as exc:
-                    raise ValueError("clientChatId 必须是 UUID") from exc
-                chat = self.state.store.create_chat(
-                    project,
-                    str(body.get("title") or (
-                        resume["title"] if resume else
-                        "新终端" if mode == "terminal" else "Codex" if mode == "codex" else "新对话"
-                    )),
-                    chat_id=client_chat_id,
-                    mode=mode,
-                    cli_session_id=resume_id,
-                )
-                self._send_json(HTTPStatus.CREATED, chat)
+                self._send_json(HTTPStatus.CREATED, self.state.create_chat(body))
+                return
+            if len(parts) == 5 and parts[:2] == ["v1", "chats"] and parts[3:] == ["cli", "open"]:
+                self._send_json(HTTPStatus.OK, self.state.prepare_cli_window(parts[2]))
                 return
             if (
                 len(parts) == 5
@@ -3232,7 +3540,15 @@ def main() -> int:
     parser.add_argument("--mcp-stdio", action="store_true")
     parser.add_argument("--chat-id")
     parser.add_argument("--project-path")
+    parser.add_argument("--attach-terminal", type=int)
+    parser.add_argument("--attach-start", default="")
+    parser.add_argument("--attach-tty", default="")
+    parser.add_argument("--attach-mode", choices=sorted(CLI_WINDOW_MODES), default="codex")
+    parser.add_argument("--attach-target", default="")
     args = parser.parse_args()
+    if args.attach_terminal is not None:
+        return run_terminal_attachment(args.attach_mode, args.attach_terminal,
+                                       args.attach_start, args.attach_tty, args.attach_target)
     if args.mcp_stdio:
         if not args.chat_id or not args.project_path:
             parser.error("MCP 模式需要 --chat-id 和 --project-path")

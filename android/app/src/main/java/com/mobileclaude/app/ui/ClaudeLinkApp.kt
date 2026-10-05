@@ -65,9 +65,11 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
@@ -76,6 +78,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -355,7 +359,7 @@ private fun BottomTabs(selected: MainTab, hasServer: Boolean, onSelect: (MainTab
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TabButton("◉", "项目", selected == MainTab.CHATS, Modifier.weight(1f), hasServer) { onSelect(MainTab.CHATS) }
-            TabButton(">_", "Codex", selected == MainTab.CODEX, Modifier.weight(1f), hasServer) { onSelect(MainTab.CODEX) }
+            TabButton(">_", "CLI", selected == MainTab.CODEX, Modifier.weight(1f), hasServer) { onSelect(MainTab.CODEX) }
             TabButton("▧", "研记", selected == MainTab.YANJI, Modifier.weight(1f)) { onSelect(MainTab.YANJI) }
             TabButton("▤", "文件", selected == MainTab.FILES, Modifier.weight(1f), hasServer) { onSelect(MainTab.FILES) }
             TabButton("▥", "算力", selected == MainTab.GPU, Modifier.weight(1f), hasServer) { onSelect(MainTab.GPU) }
@@ -2907,8 +2911,12 @@ private fun Float.gibText(): String {
 
 @Composable
 private fun CodexWindowsScreen(viewModel: AppViewModel) {
+    val context = LocalContext.current
     val windows = viewModel.codexWindows
     val active = viewModel.activeCodexWindow
+    var actionsExpanded by remember { mutableStateOf(false) }
+    var windowsExpanded by remember { mutableStateOf(false) }
+    var desktopCommandCopied by remember(active?.id) { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<ChatSummary?>(null) }
     val handoffScanner = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let(viewModel::previewCodexHandoff)
@@ -2919,80 +2927,104 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
             Modifier
                 .fillMaxWidth()
                 .padding(WindowInsets.statusBars.asPaddingValues())
-                .padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 6.dp),
+                .padding(start = 14.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("Codex · Qoder CN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "${windows.size} / 6 · 服务器命令行",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
-                )
-            }
-            TextButton(
-                onClick = {
-                    handoffScanner.launch(claudeLinkHandoffScanOptions())
-                },
-                enabled = windows.size < 6 && !viewModel.busy,
-            ) {
-                Text("扫码接力")
-            }
-            if (active != null) {
-                IconButton(onClick = { deleteTarget = active }) {
-                    Icon(Icons.Default.Delete, contentDescription = "删除 ${active.title}")
+            Text("CLI", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(end = 10.dp))
+            Box(Modifier.weight(1f)) {
+                TextButton(
+                    onClick = { actionsExpanded = false; windowsExpanded = true },
+                    enabled = windows.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "切换 CLI 窗口" },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                ) {
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                        Text(
+                            active?.let { if (it.title.startsWith(it.cliLabel)) it.title else "${it.cliLabel} · ${it.title}" }
+                                ?: if (windows.isEmpty()) "尚无窗口" else "选择窗口",
+                            fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            (if (active?.sharedTerminalTarget != null) "共享原终端 · " else "") + "${windows.size} / 6",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.Default.ArrowDropDown, contentDescription = null, modifier = Modifier.size(20.dp))
+                }
+                DropdownMenu(
+                    expanded = windowsExpanded,
+                    onDismissRequest = { windowsExpanded = false },
+                    modifier = Modifier.heightIn(max = 320.dp),
+                ) {
+                    windows.sortedBy { it.title }.forEach { window ->
+                        DropdownMenuItem(
+                            text = { Text(
+                                if (window.title.startsWith(window.cliLabel)) window.title else "${window.cliLabel} · ${window.title}",
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                fontWeight = if (window.id == active?.id) FontWeight.Bold else FontWeight.Normal,
+                            ) },
+                            onClick = { windowsExpanded = false; viewModel.openCodexWindow(window.id) },
+                            trailingIcon = { if (window.id == active?.id) Text("当前", color = AppleBlue, fontSize = 12.sp) },
+                        )
+                    }
                 }
             }
-            IconButton(onClick = viewModel::createCodexWindow, enabled = windows.size < 6 && !viewModel.busy) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = if (windows.size < 6) "增加 Codex 窗口" else "已达到 6 个窗口上限",
-                    tint = if (windows.size < 6) AppleBlue else MaterialTheme.colorScheme.outline,
-                )
-            }
-        }
-
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(onClick = viewModel::createQodercnWindow, enabled = windows.size < 6 && !viewModel.busy) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Qoder CN")
-            }
-            TextButton(onClick = { viewModel.showCliSessionPicker("codex") }, enabled = !viewModel.busy) {
-                Text("恢复 Codex")
-            }
-            TextButton(onClick = { viewModel.showCliSessionPicker("qodercn") }, enabled = !viewModel.busy) {
-                Text("恢复 Qoder")
-            }
-        }
-
-        if (windows.isNotEmpty()) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                windows.sortedBy { it.title }.forEach { window ->
-                    val selected = window.id == active?.id
-                    Surface(
-                        modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
-                            viewModel.openCodexWindow(window.id)
-                        },
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (selected) AppleBlue else MaterialTheme.colorScheme.surface,
-                    ) {
-                        Text(
-                            if (window.title.startsWith(window.cliLabel)) window.title else "${window.cliLabel} · ${window.title}",
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            Box {
+                IconButton(onClick = { windowsExpanded = false; actionsExpanded = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "CLI 操作菜单")
+                }
+                DropdownMenu(expanded = actionsExpanded, onDismissRequest = { actionsExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("新增 Codex 窗口") },
+                        leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
+                        enabled = windows.size < 6 && !viewModel.busy,
+                        onClick = { actionsExpanded = false; viewModel.createCodexWindow() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("新增 Qoder CN 窗口") },
+                        leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
+                        enabled = windows.size < 6 && !viewModel.busy,
+                        onClick = { actionsExpanded = false; viewModel.createQodercnWindow() },
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("恢复 Codex 对话") },
+                        leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                        enabled = !viewModel.busy,
+                        onClick = { actionsExpanded = false; viewModel.showCliSessionPicker("codex") },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("恢复 Qoder 对话") },
+                        leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                        enabled = !viewModel.busy,
+                        onClick = { actionsExpanded = false; viewModel.showCliSessionPicker("qodercn") },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("扫码接力") },
+                        enabled = windows.size < 6 && !viewModel.busy,
+                        onClick = { actionsExpanded = false; handoffScanner.launch(claudeLinkHandoffScanOptions()) },
+                    )
+                    if (active?.sharedTerminalTarget != null) {
+                        DropdownMenuItem(
+                            text = { Text(if (desktopCommandCopied) "已复制桌面连接" else "复制桌面连接") },
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText(
+                                    "共享终端桌面连接", "tmux attach-session -t '=${active.sharedTerminalTarget}'",
+                                ))
+                                desktopCommandCopied = true
+                            },
+                        )
+                    }
+                    if (active != null) {
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text(if (active.sharedTerminalTarget != null) "移除当前窗口" else "删除当前窗口",
+                                color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                            enabled = !viewModel.busy,
+                            onClick = { actionsExpanded = false; deleteTarget = active },
                         )
                     }
                 }
@@ -3047,6 +3079,10 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("选择已有对话继续，显示最近最多 200 条会话。", fontSize = 13.sp)
+                    Text(
+                        "正在使用的 tmux 窗口可直接共享。普通 SSH 终端接入时会转入持久窗口，原进程继续运行，原 SSH 连接不再收发该终端内容。",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     OutlinedTextField(
                         value = sessionSearch,
                         onValueChange = { sessionSearch = it },
@@ -3073,7 +3109,7 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
                                 val existing = windows.any { it.id == session.windowId }
                                 val canAttach = session.windowId != null
                                 val enabled = !viewModel.busy &&
-                                    (existing || ((!session.running || canAttach) && windows.size < 6))
+                                    (existing || windows.size < 6)
                                 Surface(
                                     modifier = Modifier.fillMaxWidth().clickable(enabled = enabled) {
                                         viewModel.restoreCliSession(session)
@@ -3086,9 +3122,9 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
                                         Text(
                                             when {
                                                 existing -> "已接入 · 点击打开窗口"
-                                                canAttach && windows.size < 6 -> "服务器窗口仍在 · 点击接入"
-                                                session.running -> "原终端使用中"
                                                 windows.size >= 6 -> "已达到 6 个窗口上限"
+                                                canAttach -> "服务器窗口仍在 · 点击接入"
+                                                session.running -> "原终端使用中 · 点击接入"
                                                 else -> session.projectPath
                                             },
                                             fontSize = 11.sp,
@@ -3113,13 +3149,17 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
     deleteTarget?.let { window ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("删除 ${window.title}？") },
-            text = { Text("该窗口中的 ${window.cliLabel} 会结束；服务器上的项目文件和已有对话记录会保留。") },
+            title = { Text(if (window.sharedTerminalTarget != null) "移除 ${window.title}？" else "删除 ${window.title}？") },
+            text = { Text(
+                if (window.sharedTerminalTarget != null)
+                    "仅移除手机窗口入口，原终端继续运行；之后可从已有对话列表再次接入。"
+                else "该窗口中的 ${window.cliLabel} 会结束；服务器上的项目文件和已有对话记录会保留。"
+            ) },
             confirmButton = {
                 TextButton(onClick = {
                     deleteTarget = null
                     viewModel.deleteCodexWindow(window.id)
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }) { Text(if (window.sharedTerminalTarget != null) "移除" else "删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
         )

@@ -90,6 +90,23 @@ internal fun buildQodercnTmuxStartupCommand(
         "if [ -x \"\$candidate\" ]; then QODERCN_BIN=\"\$candidate\"; break; fi; done; fi; ",
 )
 
+internal fun buildSharedCliTmuxStartupCommand(target: String, captureHistoryRows: Int): String {
+    require(Regex("^claude-link-(codex|qodercn)-[a-f0-9]{24}$").matches(target)) { "共享终端标识无效" }
+    require(captureHistoryRows in 1..10_000) { "终端历史行数无效" }
+    val exactTarget = shellQuote("=$target")
+    val optionTarget = shellQuote(target)
+    return "stty -echo; printf '\\033[2J\\033[H'; " +
+        "TMUX_BIN=/usr/bin/tmux; [ -x \"\$TMUX_BIN\" ] || TMUX_BIN=\"\$(type -P tmux)\"; " +
+        "[ -n \"\$TMUX_BIN\" ] || { printf '服务器未安装 tmux\\n' >&2; exit 127; }; " +
+        "export TERM=xterm-256color; " +
+        "run_tmux() { env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" \"\$@\"; }; " +
+        "run_tmux has-session -t $exactTarget 2>/dev/null || { " +
+        "printf '共享终端已结束，请刷新已有对话列表\\n' >&2; exit 1; }; " +
+        "run_tmux capture-pane -p -S -$captureHistoryRows -t $exactTarget 2>/dev/null || true; " +
+        "run_tmux set-option -t $optionTarget status off >/dev/null 2>&1 || true; " +
+        "exec env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" attach-session -t $exactTarget"
+}
+
 private fun buildCliTmuxStartupCommand(
     initialDirectory: String,
     tmuxName: String,
@@ -296,6 +313,16 @@ class SshTunnelManager(
                 "printf 'Claude Link: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
                 "printf '\\033[2J\\033[H'"
         }
+    }
+
+    @Synchronized
+    fun openSharedCliTerminal(
+        target: String,
+        initialDirectory: String,
+        columns: Int,
+        rows: Int,
+    ): SshTerminalSession = openShell(initialDirectory, columns, rows) {
+        buildSharedCliTmuxStartupCommand(target, CODEX_CAPTURE_HISTORY_ROWS)
     }
 
     @Synchronized

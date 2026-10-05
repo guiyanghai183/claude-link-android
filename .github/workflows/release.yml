@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "修复 Codex 新建或重新连接窗口时的会话 UUID 无效报错；修复 Qoder CN 消息停留在输入框、没有提交和回复的问题。发送期间防止重复点击与快捷键交错；切换窗口或断线时保留未提交草稿。修正历史恢复列表对未绑定窗口的识别，保留已有 Qoder CN、会话恢复与应用内研记功能。" \
+            --arg releaseNotes "CLI 页面顶部收成一行，新增、恢复、扫码及窗口切换通过触碰悬浮菜单显示，为 AI 对话留出更多高度。支持接入正在使用的 Codex 和 Qoder CN，包括尚未发送首条消息的新终端。已有 tmux 窗口直接共享，普通 SSH 终端转入持久窗口并保留原进程；原 SSH 连接随后不再收发该终端内容。断网重连和移除手机入口后保留同一原进程，提供复制桌面连接。保留 UUID 与发送修复、已有对话恢复及应用内研记。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

@@ -29,6 +29,7 @@ data class ChatSummary(
     val preview: String,
     val messageCount: Int,
     val cliSessionId: String? = null,
+    val sharedTerminalTarget: String? = null,
 ) {
     val isCliWindow: Boolean get() = mode == "codex" || mode == "qodercn"
     val cliLabel: String get() = if (mode == "qodercn") "Qoder CN" else "Codex"

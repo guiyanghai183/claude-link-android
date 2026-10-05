@@ -64,6 +64,10 @@ class BridgeApi(private val localPort: Int) {
         )
     )
 
+    fun prepareCliWindow(chatId: String): ChatSummary = parseChat(
+        request("POST", "/v1/chats/$chatId/cli/open", JSONObject())
+    )
+
     fun startTerminalCommand(
         chatId: String,
         command: String,
@@ -420,6 +424,7 @@ class BridgeApi(private val localPort: Int) {
         preview = json.optString("preview"),
         messageCount = json.optInt("messageCount"),
         cliSessionId = json.optionalString("cliSessionId"),
+        sharedTerminalTarget = json.optionalString("sharedTerminalTarget"),
     )
 
     private fun parseMessage(json: JSONObject): ChatMessage {

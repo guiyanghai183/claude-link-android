@@ -627,7 +627,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runTask {
                 if (wasActive) stopCodexTerminal()
-                withContext(Dispatchers.IO) { tunnel.killCodexWindow(window.id, window.mode) }
+                if (window.sharedTerminalTarget == null) {
+                    withContext(Dispatchers.IO) { tunnel.killCodexWindow(window.id, window.mode) }
+                }
                 callBridge { it.deleteChat(window.id) }
                 codexDrafts.remove(window.id)
                 refreshChatsInternal()
@@ -737,11 +739,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         codexTerminalStatus = TerminalStatus.Connecting
         viewModelScope.launch {
             try {
+                val prepared = callBridge { it.prepareCliWindow(windowId) }
+                if (generation != codexGeneration || activeCodexWindowId != windowId || selectedTab != MainTab.CODEX) {
+                    return@launch
+                }
+                val windowIndex = chats.indexOfFirst { it.id == windowId }
+                if (windowIndex >= 0) chats[windowIndex] = prepared
                 val opened = withContext(Dispatchers.IO) {
-                    if (window.mode == "qodercn") {
+                    if (prepared.sharedTerminalTarget != null) {
+                        tunnel.openSharedCliTerminal(
+                            prepared.sharedTerminalTarget, projectPath, codexColumns, codexRows,
+                        )
+                    } else if (window.mode == "qodercn") {
                         tunnel.openQodercnTerminal(
                             windowId, projectPath, codexColumns, codexRows,
-                            window.cliSessionId ?: error("Qoder CN 窗口缺少会话标识，请重新创建"),
+                            prepared.cliSessionId ?: error("Qoder CN 窗口缺少会话标识，请重新创建"),
                         )
                     } else {
                         tunnel.openCodexTerminal(
@@ -749,7 +761,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             initialDirectory = projectPath,
                             columns = codexColumns,
                             rows = codexRows,
-                            resumeSessionId = handoff?.threadId ?: window.cliSessionId,
+                            resumeSessionId = handoff?.threadId ?: prepared.cliSessionId,
                             initialPrompt = handoff?.initialPrompt(),
                         )
                     }
