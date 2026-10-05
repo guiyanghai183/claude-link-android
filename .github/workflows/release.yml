@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "算力页新增每条 GPUQ 任务的完整运行明细：GPU 数与编号、PID、磁盘读写、TCP 收发、优先级、等待/运行时长，并按主 PID 与全部子进程展示任务 CPU 百分比和等效逻辑核数。" \
+            --arg releaseNotes "新增 Qoder CN 持久命令行窗口与 Codex/Qoder CN 历史会话恢复，可搜索并重新接入服务器上的已有 Claude Link 窗口。新增应用内研记网页，无需先连接 SSH；默认舒适字号，支持大字、双指缩放、全屏阅读与附件选择，切换页面保留阅读位置和输入内容。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"

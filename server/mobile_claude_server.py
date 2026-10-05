@@ -36,14 +36,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-APP_VERSION = "0.3.31"
+APP_VERSION = "0.3.32"
 DEFAULT_PORT = 18765
 RETENTION_DAYS = 7
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_WEB_CONTEXT_CHARS = 300_000
 MAX_DIRECTORY_SUGGESTIONS = 12
-CHAT_MODES = {"claude", "terminal", "codex"}
+CHAT_MODES = {"claude", "terminal", "codex", "qodercn"}
+CLI_WINDOW_MODES = {"codex", "qodercn"}
 MAX_CODEX_WINDOWS = 6
+MAX_CLI_SESSIONS = 200
+MAX_CLI_SESSION_SCAN = 1000
+CLI_METADATA_BYTES = 64 * 1024
 MAX_TERMINAL_COMMAND_CHARS = 16_000
 MAX_TERMINAL_OUTPUT_CHARS = 120_000
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
@@ -699,6 +703,206 @@ def prepare_user_prompt(text: str, attachments: list[Any]) -> tuple[str, list[di
     return combined, safe_attachments
 
 
+def active_cli_sessions(mode: str, proc_root: Path = Path("/proc")) -> dict[str, str]:
+    """Map this user's live conversation IDs to terminals; never expose arguments."""
+    active: dict[str, str] = {}
+    if not proc_root.is_dir() or not hasattr(os, "getuid"):
+        return active
+    for process in proc_root.iterdir():
+        try:
+            if not process.name.isdigit() or process.stat().st_uid != os.getuid():
+                continue
+            command = (process / "comm").read_text().strip()
+            prefix = "qoderclicn" if mode == "qodercn" else "codex"
+            if not command.startswith(prefix):
+                continue
+            process_sessions: set[str] = set()
+            args = (process / "cmdline").read_bytes().decode(errors="replace").split("\0")
+            for index, arg in enumerate(args[:-1]):
+                if arg in {"--session-id", "--resume", "-r", "resume"}:
+                    with contextlib.suppress(ValueError):
+                        process_sessions.add(str(uuid.UUID(args[index + 1])))
+            for descriptor in (process / "fd").iterdir():
+                with contextlib.suppress(OSError):
+                    target = os.readlink(descriptor)
+                    if mode == "qodercn":
+                        match = re.search(r"/\.qoder-cn/logs/sessions/[^/]+/([0-9a-f-]{36})/", target)
+                    else:
+                        match = re.search(r"/\.codex/sessions/.*/[^/]*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$", target)
+                    if match:
+                        with contextlib.suppress(ValueError):
+                            process_sessions.add(str(uuid.UUID(match.group(1))))
+            terminal = ""
+            with contextlib.suppress(OSError):
+                terminal = os.readlink(process / "fd" / "0")
+            for session_id in process_sessions:
+                active.setdefault(session_id, terminal)
+        except (OSError, ValueError):
+            continue
+    return active
+
+
+def active_cli_session_ids(mode: str, proc_root: Path = Path("/proc")) -> set[str]:
+    return set(active_cli_sessions(mode, proc_root))
+
+
+def cli_tmux_window_ids(chats: list[dict[str, Any]], mode: str) -> dict[str, str]:
+    """Recognize existing app windows, including legacy Codex rows without a UUID."""
+    active = active_cli_sessions(mode)
+    executable = shutil.which("tmux")
+    if not active or not executable:
+        return {}
+    names = {
+        "claude-link-" + mode + "-" + re.sub(r"[^a-z0-9]", "", chat["id"].lower())[:24]: chat["id"]
+        for chat in chats if chat["mode"] == mode
+    }
+    env = dict(os.environ)
+    env.pop("LD_LIBRARY_PATH", None)
+    try:
+        result = subprocess.run(
+            [executable, "list-panes", "-a", "-F", "#{session_name}\t#{pane_tty}"],
+            env=env, capture_output=True, text=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode != 0:
+        return {}
+    terminals = {}
+    for line in result.stdout.splitlines():
+        name, separator, terminal = line.partition("\t")
+        match = re.fullmatch(rf"claude-link-{mode}-([a-f0-9]{{24}})", name)
+        if separator and match and name not in names:
+            # Re-register an app-owned tmux window whose old database row was lost.
+            # The first 24 UUID hex digits reproduce its exact existing tmux name.
+            names[name] = str(uuid.UUID(hex=match.group(1) + "00000000"))
+        if separator and name in names:
+            terminals[terminal] = names[name]
+    return {session_id: terminals[terminal] for session_id, terminal in active.items()
+            if terminal in terminals}
+
+
+def codex_session_titles(home: Path) -> dict[str, str]:
+    index = home / ".codex" / "session_index.jsonl"
+    titles: dict[str, str] = {}
+    try:
+        if index.is_symlink():
+            return titles
+        with index.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - 1024 * 1024))
+            for line in stream.read(1024 * 1024).splitlines():
+                with contextlib.suppress(ValueError, UnicodeDecodeError, TypeError, KeyError):
+                    entry = json.loads(line)
+                    if isinstance(entry, dict) and isinstance(entry.get("thread_name"), str):
+                        titles[str(uuid.UUID(entry["id"]))] = entry["thread_name"].strip()[:80]
+    except OSError:
+        pass
+    return titles
+
+
+def discover_cli_sessions(mode: str, home: Path | None = None) -> list[dict[str, Any]]:
+    """Read bounded metadata from conversation files; do not launch either CLI."""
+    if mode not in CLI_WINDOW_MODES:
+        raise ValueError("无效的命令行类型")
+    home = home or Path.home()
+    titles = codex_session_titles(home) if mode == "codex" else {}
+    folder = ".qoder-cn/projects" if mode == "qodercn" else ".codex/sessions"
+    root = (home / folder).resolve()
+    if not root.is_dir():
+        return []
+    candidates: list[tuple[float, Path]] = []
+    pattern = "*/*.jsonl" if mode == "qodercn" else "*/*/*/*.jsonl"
+    for path in root.glob(pattern):
+        try:
+            if path.is_symlink() or not path.resolve().is_relative_to(root):
+                continue
+            candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    running = active_cli_session_ids(mode)
+    sessions: dict[str, dict[str, Any]] = {}
+    for modified, path in sorted(candidates, key=lambda item: item[0], reverse=True)[:MAX_CLI_SESSION_SCAN]:
+        try:
+            with path.open("rb") as stream:
+                first = stream.read(CLI_METADATA_BYTES)
+                end = stream.seek(0, os.SEEK_END)
+                last = b""
+                if end > CLI_METADATA_BYTES:
+                    stream.seek(max(CLI_METADATA_BYTES, end - CLI_METADATA_BYTES))
+                    last = stream.read(CLI_METADATA_BYTES)
+            records = []
+            for line in (first + b"\n" + last).splitlines():
+                with contextlib.suppress(ValueError, UnicodeDecodeError):
+                    record = json.loads(line)
+                    if isinstance(record, dict):
+                        records.append(record)
+            if mode == "qodercn":
+                session_id = str(uuid.UUID(path.stem))
+                records = [record for record in records if record.get("sessionId") == session_id]
+                project = next((record["cwd"] for record in records
+                                if isinstance(record.get("cwd"), str)), "")
+            else:
+                meta = next((record.get("payload") for record in records
+                             if record.get("type") == "session_meta"
+                             and isinstance(record.get("payload"), dict)), {})
+                # Automated exec jobs and subagents are not interactive phone windows.
+                if meta.get("source") not in (None, "cli", "vscode"):
+                    continue
+                session_id = str(uuid.UUID(str(meta.get("id", ""))))
+                project = meta.get("cwd", "")
+            if not isinstance(project, str) or not Path(project).is_absolute():
+                continue
+            title = ""
+            custom_title = ""
+            preview = ""
+            for record in records:
+                if mode == "qodercn":
+                    if record.get("type") == "custom-title":
+                        custom_title = record.get("customTitle", custom_title)
+                    elif record.get("type") == "ai-title":
+                        title = record.get("aiTitle", title)
+                    message = record.get("message")
+                    content = message.get("content") if isinstance(message, dict) and record.get("type") == "user" else None
+                else:
+                    payload = record.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    if record.get("type") == "event_msg" and payload.get("type") == "user_message":
+                        content = payload.get("message")
+                    elif record.get("type") == "response_item" and payload.get("role") == "user":
+                        content = payload.get("content")
+                    else:
+                        content = None
+                if not preview:
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        text = " ".join(str(block.get("text", "")) for block in content
+                                        if isinstance(block, dict) and block.get("type") in {"text", "input_text"})
+                    else:
+                        text = ""
+                    # Skip injected setup instructions when naming Codex conversations.
+                    if text and not text.lstrip().startswith(("# AGENTS.md", "<environment_context>", "<INSTRUCTIONS>", "<permissions")):
+                        preview = " ".join(text.split())[:140]
+            label = "Qoder CN" if mode == "qodercn" else "Codex"
+            title = custom_title or titles.get(session_id) or title or preview[:80] or f"{label} {session_id[:8]}…{session_id[-6:]}"
+            if session_id not in sessions:
+                sessions[session_id] = {
+                    "id": session_id,
+                    "mode": mode,
+                    "title": str(title).strip()[:80],
+                    "projectPath": project,
+                    "updatedAt": utc_iso(modified),
+                    "preview": preview,
+                    "running": session_id in running,
+                }
+            if len(sessions) >= MAX_CLI_SESSIONS:
+                break
+        except (OSError, ValueError):
+            continue
+    return list(sessions.values())
+
+
 class Store:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -783,6 +987,13 @@ class Store:
             }
             if "mode" not in chat_columns:
                 conn.execute("ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'claude'")
+            if "cli_session_id" not in chat_columns:
+                conn.execute("ALTER TABLE chats ADD COLUMN cli_session_id TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_cli_session "
+                "ON chats(mode,cli_session_id) WHERE cli_session_id IS NOT NULL "
+                "AND mode IN ('codex','qodercn')"
+            )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_claude_sessions_active "
                 "ON claude_sessions(chat_id) WHERE active=1"
@@ -887,35 +1098,52 @@ class Store:
         title: str = "新对话",
         chat_id: str | None = None,
         mode: str = "claude",
+        cli_session_id: str | None = None,
     ) -> dict[str, Any]:
         if mode not in CHAT_MODES:
             raise ValueError("对话类型无效")
+        if cli_session_id is not None:
+            if mode not in CLI_WINDOW_MODES:
+                raise ValueError("只有命令行窗口支持恢复会话")
+            cli_session_id = str(uuid.UUID(cli_session_id))
+        elif mode == "qodercn":
+            cli_session_id = str(uuid.uuid4())
         chat_id = chat_id or str(uuid.uuid4())
         current = now_ts()
         with self._write_lock:
             conn = self.connection()
             if conn.execute("SELECT 1 FROM chats WHERE id=?", (chat_id,)).fetchone() is not None:
                 return self.get_chat(chat_id)
-            if mode == "codex":
+            if cli_session_id is not None:
+                existing = conn.execute(
+                    "SELECT id FROM chats WHERE mode=? AND cli_session_id=?", (mode, cli_session_id)
+                ).fetchone()
+                if existing is not None:
+                    return self.get_chat(existing["id"])
+            if mode in CLI_WINDOW_MODES:
                 codex_rows = conn.execute(
-                    "SELECT title FROM chats WHERE mode='codex' ORDER BY created_at"
+                    "SELECT title FROM chats WHERE mode=? ORDER BY created_at", (mode,)
                 ).fetchall()
-                if len(codex_rows) >= MAX_CODEX_WINDOWS:
-                    raise ValueError(f"Codex 窗口最多只能创建 {MAX_CODEX_WINDOWS} 个")
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM chats WHERE mode IN ('codex','qodercn')"
+                ).fetchone()[0]
+                if count >= MAX_CODEX_WINDOWS:
+                    raise ValueError(f"命令行窗口最多只能创建 {MAX_CODEX_WINDOWS} 个")
+                label = "Qoder CN" if mode == "qodercn" else "Codex"
                 used_numbers = {
                     int(match.group(1))
                     for row in codex_rows
-                    if (match := re.fullmatch(r"Codex (\d+)", str(row["title"]))) is not None
+                    if (match := re.fullmatch(rf"{label} (\d+)", str(row["title"]))) is not None
                 }
                 window_number = next(
                     number for number in range(1, MAX_CODEX_WINDOWS + 1)
                     if number not in used_numbers
                 )
-                if not title.strip() or title in {"新对话", "Codex"}:
-                    title = f"Codex {window_number}"
+                if not title.strip() or title in {"新对话", label}:
+                    title = f"{label} {window_number}"
             conn.execute(
-                "INSERT INTO chats(id,title,project_path,mode,created_at,updated_at,pinned) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO chats(id,title,project_path,mode,created_at,updated_at,pinned,cli_session_id) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 (
                     chat_id,
                     title.strip()[:80] or (
@@ -925,7 +1153,8 @@ class Store:
                     mode,
                     current,
                     current,
-                    int(mode == "codex"),
+                    int(mode in CLI_WINDOW_MODES),
+                    cli_session_id,
                 ),
             )
             if mode == "claude":
@@ -1004,6 +1233,7 @@ class Store:
             "title": row["title"],
             "projectPath": row["project_path"],
             "mode": row["mode"] if "mode" in keys else "claude",
+            "cliSessionId": row["cli_session_id"] if "cli_session_id" in keys else None,
             "createdAt": utc_iso(row["created_at"]),
             "updatedAt": utc_iso(row["updated_at"]),
             "pinned": bool(row["pinned"]),
@@ -2270,6 +2500,16 @@ class ServiceState:
         self._gpu_cached_snapshot: dict[str, Any] | None = None
         self.cleanup_expired()
 
+    def cli_sessions(self, mode: str) -> list[dict[str, Any]]:
+        chats = self.store.list_chats()
+        windows = cli_tmux_window_ids(chats, mode)
+        windows.update({
+            chat["cliSessionId"]: chat["id"] for chat in chats
+            if chat["mode"] == mode and chat["cliSessionId"]
+        })
+        return [dict(session, windowId=windows.get(session["id"]))
+                for session in discover_cli_sessions(mode)]
+
     def gpu_snapshot(self) -> dict[str, Any]:
         """Coalesce concurrent dashboard refreshes and briefly reuse the last sample."""
         with self._gpu_lock:
@@ -2594,6 +2834,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if parts == ["v1", "system", "gpus"]:
                 self._send_json(HTTPStatus.OK, self.state.gpu_snapshot())
                 return
+            if len(parts) == 3 and parts[0] == "v1" and parts[1] in CLI_WINDOW_MODES and parts[2] == "sessions":
+                self._send_json(HTTPStatus.OK, {"sessions": self.state.cli_sessions(parts[1])})
+                return
             if parts == ["v1", "chats"]:
                 self.state.cleanup_expired()
                 self._send_json(HTTPStatus.OK, {"chats": self.state.store.list_chats()})
@@ -2634,8 +2877,32 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 project = self.state.validate_project(str(body.get("projectPath") or Path.home()))
                 mode = str(body.get("mode") or "claude").strip().lower()
                 if mode not in CHAT_MODES:
-                    raise ValueError("对话类型必须是 claude、terminal 或 codex")
-                raw_chat_id = str(body.get("clientChatId") or uuid.uuid4())
+                    raise ValueError("对话类型必须是 claude、terminal、codex 或 qodercn")
+                resume_id = body.get("resumeSessionId")
+                resume = None
+                if resume_id is not None:
+                    if mode not in CLI_WINDOW_MODES:
+                        raise ValueError("只有命令行窗口支持恢复会话")
+                    try:
+                        resume_id = str(uuid.UUID(str(resume_id)))
+                    except ValueError as exc:
+                        raise ValueError("resumeSessionId 必须是 UUID") from exc
+                    resume = next((item for item in self.state.cli_sessions(mode)
+                                   if item["id"] == resume_id), None)
+                    if resume is None:
+                        raise FileNotFoundError("会话记录已不存在，请刷新列表")
+                    if resume["windowId"]:
+                        try:
+                            existing = self.state.store.get_chat(resume["windowId"])
+                        except KeyError:
+                            existing = None
+                        if existing is not None:
+                            self._send_json(HTTPStatus.CREATED, existing)
+                            return
+                    if resume["running"] and not resume["windowId"]:
+                        raise ChatBusyError("该会话正在其他终端使用，暂时无法恢复")
+                    project = self.state.validate_project(resume["projectPath"])
+                raw_chat_id = str((resume or {}).get("windowId") or body.get("clientChatId") or uuid.uuid4())
                 try:
                     client_chat_id = str(uuid.UUID(raw_chat_id))
                 except ValueError as exc:
@@ -2643,10 +2910,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 chat = self.state.store.create_chat(
                     project,
                     str(body.get("title") or (
+                        resume["title"] if resume else
                         "新终端" if mode == "terminal" else "Codex" if mode == "codex" else "新对话"
                     )),
                     chat_id=client_chat_id,
                     mode=mode,
+                    cli_session_id=resume_id,
                 )
                 self._send_json(HTTPStatus.CREATED, chat)
                 return

@@ -58,32 +58,73 @@ internal fun buildCodexTmuxStartupCommand(
     tmuxName: String,
     launchCommand: String,
     captureHistoryRows: Int,
+): String = buildCliTmuxStartupCommand(
+    initialDirectory, tmuxName, launchCommand, captureHistoryRows,
+    label = "Codex", variable = "CODEX",
+    resolveExecutable = "CODEX_BIN=\"\$(type -P codex)\"; ",
+)
+
+internal fun buildQodercnLaunchCommand(sessionId: String): String {
+    require(Regex("^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", RegexOption.IGNORE_CASE).matches(sessionId)) {
+        "Qoder CN 会话 UUID 无效"
+    }
+    return "if [ -d \"\$HOME/.qoder-cn/projects\" ] && " +
+        "find \"\$HOME/.qoder-cn/projects\" -maxdepth 2 -type f -name ${shellQuote("$sessionId.jsonl")} " +
+        "-print -quit 2>/dev/null | grep -q .; then " +
+        "exec \"\$QODERCN_BIN\" --resume ${shellQuote(sessionId)}; " +
+        "else exec \"\$QODERCN_BIN\" --session-id ${shellQuote(sessionId)}; fi"
+}
+
+internal fun buildQodercnTmuxStartupCommand(
+    initialDirectory: String,
+    tmuxName: String,
+    sessionId: String,
+    captureHistoryRows: Int,
+): String = buildCliTmuxStartupCommand(
+    initialDirectory, tmuxName, buildQodercnLaunchCommand(sessionId), captureHistoryRows,
+    label = "Qoder CN", variable = "QODERCN",
+    resolveExecutable = "QODERCN_BIN=\"\$(type -P qodercn || type -P qoderclicn)\"; " +
+        "if [ -z \"\$QODERCN_BIN\" ]; then " +
+        "for candidate in \"\$HOME/.qoder-cn/entry/qodercn\" \"\$HOME/.local/bin/qoderclicn\" " +
+        "\"\$HOME/.qoder-cn/bin/qoderclicn/qoderclicn\"; do " +
+        "if [ -x \"\$candidate\" ]; then QODERCN_BIN=\"\$candidate\"; break; fi; done; fi; ",
+)
+
+private fun buildCliTmuxStartupCommand(
+    initialDirectory: String,
+    tmuxName: String,
+    launchCommand: String,
+    captureHistoryRows: Int,
+    label: String,
+    variable: String,
+    resolveExecutable: String,
 ): String =
     "stty -echo; printf '\\033[2J\\033[H'; " +
         "cd -- ${shellQuote(initialDirectory)} || { " +
-        "printf 'Codex: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
+        "printf '$label: cannot enter selected remote directory\\n' >&2; exit 72; }; " +
         "TMUX_BIN=/usr/bin/tmux; " +
         "[ -x \"\$TMUX_BIN\" ] || TMUX_BIN=\"\$(type -P tmux)\"; " +
         "[ -n \"\$TMUX_BIN\" ] || { " +
-        "printf 'Codex 窗口需要服务器安装 tmux\\n' >&2; exit 127; }; " +
-        "CODEX_BIN=\"\$(type -P codex)\"; " +
-        "[ -n \"\$CODEX_BIN\" ] || { " +
-        "printf '服务器尚未安装 Codex CLI\\n' >&2; exit 127; }; " +
-        "CODEX_LAUNCH=${shellQuote(launchCommand)}; " +
+        "printf '$label 窗口需要服务器安装 tmux\\n' >&2; exit 127; }; " +
         "export TERM=xterm-256color; " +
         "run_tmux() { env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" \"\$@\"; }; " +
         "if run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null; then " +
         "run_tmux capture-pane -p -S -$captureHistoryRows " +
         "-t ${shellQuote(tmuxName)} 2>/dev/null || true; " +
-        "else run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
+        "else " + resolveExecutable +
+        "[ -n \"\$${variable}_BIN\" ] && [ -x \"\$${variable}_BIN\" ] || { " +
+        "printf '服务器尚未安装 $label CLI\\n' >&2; exit 127; }; " +
+        "${variable}_LAUNCH=${shellQuote(launchCommand)}; " +
+        "run_tmux new-session -d -s ${shellQuote(tmuxName)} " +
         "-c ${shellQuote(initialDirectory)} " +
-        "\"CODEX_BIN=\$CODEX_BIN; export CODEX_BIN; \$CODEX_LAUNCH\" || { " +
-        "printf 'Codex 窗口创建失败\\n' >&2; exit 1; }; fi; " +
+        "\"${variable}_BIN=\$${variable}_BIN; export ${variable}_BIN; \$${variable}_LAUNCH\" || { " +
+        "printf '$label 窗口创建失败\\n' >&2; exit 1; }; fi; " +
         "run_tmux has-session -t ${shellQuote(tmuxName)} 2>/dev/null || { " +
-        "printf 'Codex 进程启动后立即退出，请检查服务器 Codex CLI\\n' >&2; exit 1; }; " +
+        "printf '$label 进程启动后立即退出，请检查服务器 $label CLI\\n' >&2; exit 1; }; " +
         "run_tmux set-option -t ${shellQuote(tmuxName)} status off >/dev/null 2>&1 || true; " +
         "exec env -u LD_LIBRARY_PATH \"\$TMUX_BIN\" " +
         "attach-session -t ${shellQuote(tmuxName)}"
+
 
 data class TunnelConnection(
     val profile: ServerProfile,
@@ -286,9 +327,22 @@ class SshTunnelManager(
     }
 
     @Synchronized
-    fun killCodexWindow(windowId: String) {
+    fun openQodercnTerminal(
+        windowId: String,
+        initialDirectory: String,
+        columns: Int,
+        rows: Int,
+        sessionId: String,
+    ): SshTerminalSession = openShell(initialDirectory, columns, rows) {
+        buildQodercnTmuxStartupCommand(
+            initialDirectory, codexTmuxName(windowId, "qodercn"), sessionId, CODEX_CAPTURE_HISTORY_ROWS,
+        )
+    }
+
+    @Synchronized
+    fun killCodexWindow(windowId: String, mode: String = "codex") {
         val session = active?.session?.takeIf { it.isConnected } ?: return
-        val tmuxName = codexTmuxName(windowId)
+        val tmuxName = codexTmuxName(windowId, mode)
         exec(
             session,
             "TMUX_BIN=/usr/bin/tmux; " +
@@ -595,10 +649,11 @@ class SshTunnelManager(
         .digest(bytes)
         .joinToString("") { "%02x".format(it) }
 
-    private fun codexTmuxName(windowId: String): String {
+    private fun codexTmuxName(windowId: String, mode: String = "codex"): String {
+        require(mode == "codex" || mode == "qodercn") { "命令行类型无效" }
         val suffix = windowId.filter(Char::isLetterOrDigit).lowercase().take(24)
         require(suffix.isNotBlank()) { "Codex 窗口标识无效" }
-        return "claude-link-codex-$suffix"
+        return "claude-link-$mode-$suffix"
     }
 
     companion object {

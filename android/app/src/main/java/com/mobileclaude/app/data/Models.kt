@@ -28,6 +28,21 @@ data class ChatSummary(
     val status: String,
     val preview: String,
     val messageCount: Int,
+    val cliSessionId: String? = null,
+) {
+    val isCliWindow: Boolean get() = mode == "codex" || mode == "qodercn"
+    val cliLabel: String get() = if (mode == "qodercn") "Qoder CN" else "Codex"
+}
+
+data class CliSession(
+    val id: String,
+    val mode: String,
+    val title: String,
+    val projectPath: String,
+    val updatedAt: String,
+    val preview: String,
+    val running: Boolean,
+    val windowId: String?,
 )
 
 data class ChatMessage(
@@ -158,7 +173,7 @@ data class GpuSnapshot(
     val queue: GpuQueueSnapshot,
 )
 
-enum class MainTab { CHATS, CODEX, FILES, GPU, SERVERS }
+enum class MainTab { CHATS, CODEX, YANJI, FILES, GPU, SERVERS }
 
 sealed interface TerminalStatus {
     data object Disconnected : TerminalStatus

@@ -16,6 +16,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mobileclaude.app.data.ChatDetail
 import com.mobileclaude.app.data.ChatSummary
+import com.mobileclaude.app.data.CliSession
 import com.mobileclaude.app.data.ConnectionStatus
 import com.mobileclaude.app.data.DirectoryListing
 import com.mobileclaude.app.data.GpuSnapshot
@@ -129,11 +130,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var updateState by mutableStateOf<UpdateState>(UpdateState.Idle)
         private set
     val codexWindows: List<ChatSummary>
-        get() = chats.filter { it.mode == "codex" }
+        get() = chats.filter(ChatSummary::isCliWindow)
     val projectChats: List<ChatSummary>
-        get() = chats.filter { it.mode != "codex" }
+        get() = chats.filterNot(ChatSummary::isCliWindow)
     var activeCodexWindowId by mutableStateOf<String?>(null)
         private set
+    var cliSessionPickerMode by mutableStateOf<String?>(null)
+        private set
+    var cliSessions by mutableStateOf<List<CliSession>>(emptyList())
+        private set
+    var cliSessionsBusy by mutableStateOf(false)
+        private set
+    var cliSessionError by mutableStateOf<String?>(null)
+        private set
+    private var cliSessionPickerGeneration = 0L
     var pendingCodexHandoff by mutableStateOf<ClaudeLinkHandoff?>(null)
         private set
     val activeCodexWindow: ChatSummary?
@@ -410,6 +420,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pendingWebAttachments.clear()
         terminalDrafts.clear()
         codexDrafts.clear()
+        dismissCliSessionPicker()
         ocrPreviewTargetChatId = null
         ocrPreviewDraft = null
         chats.clear()
@@ -481,9 +492,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createCodexWindow() {
+    fun createCodexWindow() = createCliWindow("codex")
+
+    fun createQodercnWindow() = createCliWindow("qodercn")
+
+    private fun createCliWindow(mode: String) {
         if (codexWindows.size >= MAX_CODEX_WINDOWS) {
-            errorMessage = "Codex 窗口最多只能创建 $MAX_CODEX_WINDOWS 个"
+            errorMessage = "命令行窗口最多只能创建 $MAX_CODEX_WINDOWS 个"
             return
         }
         val clientChatId = UUID.randomUUID().toString()
@@ -491,12 +506,64 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             runTask {
                 val home = (connectionStatus as? ConnectionStatus.Connected)?.health?.home
                     ?: error("服务器尚未连接")
-                val created = callBridge { it.createChat(home, clientChatId, "codex") }
+                val created = callBridge { it.createChat(home, clientChatId, mode) }
                 refreshChatsInternal()
                 activeCodexWindowId = created.id
                 selectedTab = MainTab.CODEX
                 rememberCodexNavigation(created.id)
                 startCodexTerminal(created.id, created.projectPath)
+            }
+        }
+    }
+
+    fun showCliSessionPicker(mode: String) {
+        require(mode == "codex" || mode == "qodercn")
+        cliSessionPickerGeneration += 1
+        val generation = cliSessionPickerGeneration
+        cliSessionPickerMode = mode
+        cliSessions = emptyList()
+        cliSessionError = null
+        cliSessionsBusy = true
+        viewModelScope.launch {
+            try {
+                val sessions = callBridge { it.listCliSessions(mode) }
+                if (generation == cliSessionPickerGeneration) cliSessions = sessions
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                if (generation == cliSessionPickerGeneration) cliSessionError = error.userMessage()
+            } finally {
+                if (generation == cliSessionPickerGeneration) cliSessionsBusy = false
+            }
+        }
+    }
+
+    fun dismissCliSessionPicker() {
+        cliSessionPickerGeneration += 1
+        cliSessionPickerMode = null
+        cliSessions = emptyList()
+        cliSessionsBusy = false
+        cliSessionError = null
+    }
+
+    fun restoreCliSession(session: CliSession) {
+        dismissCliSessionPicker()
+        val existing = session.windowId?.let { id -> codexWindows.firstOrNull { it.id == id } }
+        if (existing != null) {
+            openCodexWindow(existing.id)
+            return
+        }
+        if (codexWindows.size >= MAX_CODEX_WINDOWS) {
+            errorMessage = "命令行窗口最多只能创建 $MAX_CODEX_WINDOWS 个"
+            return
+        }
+        val clientChatId = UUID.randomUUID().toString()
+        viewModelScope.launch {
+            runTask {
+                val created = callBridge {
+                    it.createChat(session.projectPath, clientChatId, session.mode, session.id)
+                }
+                refreshChatsInternal()
+                openCodexWindow(created.id)
             }
         }
     }
@@ -518,7 +585,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val handoff = pendingCodexHandoff ?: return
         pendingCodexHandoff = null
         if (codexWindows.size >= MAX_CODEX_WINDOWS) {
-            errorMessage = "Codex 窗口最多只能创建 $MAX_CODEX_WINDOWS 个；请先删除一个窗口再扫码接力"
+            errorMessage = "命令行窗口最多只能创建 $MAX_CODEX_WINDOWS 个；请先删除一个窗口再扫码接力"
             return
         }
         val clientChatId = UUID.randomUUID().toString()
@@ -555,7 +622,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runTask {
                 if (wasActive) stopCodexTerminal()
-                withContext(Dispatchers.IO) { tunnel.killCodexWindow(window.id) }
+                withContext(Dispatchers.IO) { tunnel.killCodexWindow(window.id, window.mode) }
                 callBridge { it.deleteChat(window.id) }
                 codexDrafts.remove(window.id)
                 refreshChatsInternal()
@@ -574,7 +641,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendCodexPrompt(text: String, onAccepted: () -> Unit = {}) {
         val opened = codexSession?.takeIf { it.isConnected } ?: run {
-            errorMessage = "Codex 窗口尚未连接"
+            errorMessage = "命令行窗口尚未连接"
             return
         }
         if (text.isBlank()) return
@@ -635,6 +702,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         projectPath: String,
         handoff: ClaudeLinkHandoff? = null,
     ) {
+        val window = codexWindows.firstOrNull { it.id == windowId } ?: return
         stopTerminalSession()
         stopCodexTerminal()
         activeCodexWindowId = windowId
@@ -644,14 +712,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val opened = withContext(Dispatchers.IO) {
-                    tunnel.openCodexTerminal(
-                        windowId = windowId,
-                        initialDirectory = projectPath,
-                        columns = codexColumns,
-                        rows = codexRows,
-                        resumeSessionId = handoff?.threadId,
-                        initialPrompt = handoff?.initialPrompt(),
-                    )
+                    if (window.mode == "qodercn") {
+                        tunnel.openQodercnTerminal(
+                            windowId, projectPath, codexColumns, codexRows,
+                            window.cliSessionId ?: error("Qoder CN 窗口缺少会话标识，请重新创建"),
+                        )
+                    } else {
+                        tunnel.openCodexTerminal(
+                            windowId = windowId,
+                            initialDirectory = projectPath,
+                            columns = codexColumns,
+                            rows = codexRows,
+                            resumeSessionId = handoff?.threadId ?: window.cliSessionId,
+                            initialPrompt = handoff?.initialPrompt(),
+                        )
+                    }
                 }
                 if (
                     generation != codexGeneration ||
@@ -1432,6 +1507,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         pendingWebAttachments.clear()
         terminalDrafts.clear()
         codexDrafts.clear()
+        dismissCliSessionPicker()
         ocrPreviewTargetChatId = null
         ocrPreviewDraft = null
         chats.clear()
@@ -1484,7 +1560,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun restoreProfileNavigation() {
         val profileId = activeProfile?.id ?: return
-        selectedTab = profileRepository.lastSelectedTab(profileId) ?: MainTab.CHATS
+        if (selectedTab != MainTab.YANJI) {
+            selectedTab = profileRepository.lastSelectedTab(profileId) ?: MainTab.CHATS
+        }
         if (selectedTab == MainTab.CODEX) {
             activeCodexWindow?.let { startCodexTerminal(it.id, it.projectPath) }
         }
@@ -1698,8 +1776,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
             profileId?.let { profileRepository.setLastCodexWindowId(it, activeCodexWindowId) }
         }
-        activeProfile?.id?.let { profileId ->
-            selectedTab = profileRepository.lastSelectedTab(profileId) ?: selectedTab
+        if (selectedTab != MainTab.YANJI) {
+            activeProfile?.id?.let { profileId ->
+                selectedTab = profileRepository.lastSelectedTab(profileId) ?: selectedTab
+            }
         }
         if (selectedTab == MainTab.CODEX) {
             val window = activeCodexWindow

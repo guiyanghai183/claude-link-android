@@ -1,0 +1,47 @@
+/* Local reading adjustments; the website still owns navigation and editing. */
+html { -webkit-text-size-adjust: 100%; }
+@media (max-width: 700px) {
+  .document-editor .tiptap {
+    font-size: 16px !important;
+    line-height: 1.85 !important;
+  }
+  .document-title { overflow-wrap: anywhere; }
+  .note-card p { font-size: 14px !important; line-height: 1.65 !important; }
+  .login-card label, .login-card > p { font-size: 15px !important; }
+  .login-card .checkline {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    min-height: 44px;
+    line-height: 1.5;
+  }
+  .login-card .checkline input[type="checkbox"] {
+    width: 20px !important;
+    height: 20px !important;
+    min-height: 0;
+    flex: 0 0 20px;
+    padding: 0;
+    margin: 0;
+  }
+  .login-card input, .password-field input,
+  .modal input:not([type="checkbox"]):not([type="radio"]),
+  .modal textarea, .modal select, .conclusion-box textarea {
+    font-size: 16px !important;
+  }
+  .login-card > .primary, .login-card .password-field button {
+    min-height: 44px;
+  }
+  .tiptap pre {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .tiptap .tableWrapper, .tiptap [data-type="block-math"], .katex-display {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .tiptap img, .tiptap video { max-width: 100%; height: auto; }
+  .document, .workspace, .note-list { min-width: 0; }
+}

@@ -165,6 +165,9 @@ import kotlin.math.roundToInt
 @Composable
 fun ClaudeLinkApp(viewModel: AppViewModel) {
     val snackbars = remember { SnackbarHostState() }
+    val yanjiSession = rememberYanjiWebSession()
+    var yanjiFullScreen by rememberSaveable { mutableStateOf(false) }
+    var tabBeforeYanji by remember { mutableStateOf(MainTab.SERVERS) }
     val density = LocalDensity.current
     val keyboardVisible = WindowInsets.ime.getBottom(density) > 0
     val error = viewModel.errorMessage
@@ -179,8 +182,20 @@ fun ClaudeLinkApp(viewModel: AppViewModel) {
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbars) },
         bottomBar = {
-            if (viewModel.activeProfile != null && !keyboardVisible) {
-                BottomTabs(viewModel.selectedTab, viewModel::selectTab)
+            if (!keyboardVisible && !(viewModel.selectedTab == MainTab.YANJI && yanjiFullScreen)) {
+                BottomTabs(
+                    selected = if (viewModel.activeProfile == null && viewModel.selectedTab != MainTab.YANJI) {
+                        MainTab.SERVERS
+                    } else viewModel.selectedTab,
+                    hasServer = viewModel.activeProfile != null,
+                    onSelect = { next ->
+                        if (next == MainTab.YANJI && viewModel.selectedTab != MainTab.YANJI) {
+                            tabBeforeYanji = viewModel.selectedTab
+                        }
+                        if (next != MainTab.YANJI) yanjiFullScreen = false
+                        viewModel.selectTab(next)
+                    },
+                )
             }
         },
     ) { contentPadding ->
@@ -191,7 +206,20 @@ fun ClaudeLinkApp(viewModel: AppViewModel) {
                 .padding(bottomPadding)
                 .consumeWindowInsets(bottomPadding)
         ) {
-            if (viewModel.activeProfile == null) {
+            if (viewModel.selectedTab == MainTab.YANJI) {
+                YanjiWebScreen(
+                    session = yanjiSession,
+                    fullScreen = yanjiFullScreen,
+                    onFullScreenChange = { yanjiFullScreen = it },
+                    onExit = {
+                        yanjiFullScreen = false
+                        viewModel.selectTab(
+                            if (viewModel.activeProfile != null) tabBeforeYanji else MainTab.SERVERS,
+                        )
+                    },
+                    onMessage = viewModel::showError,
+                )
+            } else if (viewModel.activeProfile == null) {
                 ServerLanding(viewModel)
             } else {
                 AnimatedContent(viewModel.selectedTab, label = "main-tabs") { tab ->
@@ -202,13 +230,14 @@ fun ClaudeLinkApp(viewModel: AppViewModel) {
                             ChatScreen(viewModel, viewModel.activeChat!!)
                         }
                         MainTab.CODEX -> CodexWindowsScreen(viewModel)
+                        MainTab.YANJI -> Unit
                         MainTab.FILES -> RemoteFilesScreen(viewModel)
                         MainTab.GPU -> GpuScreen(viewModel)
                         MainTab.SERVERS -> ServerLanding(viewModel)
                     }
                 }
             }
-            ReconnectingBanner(viewModel)
+            if (viewModel.selectedTab != MainTab.YANJI) ReconnectingBanner(viewModel)
         }
     }
 
@@ -315,20 +344,21 @@ private fun OcrPreviewSheet(viewModel: AppViewModel) {
 }
 
 @Composable
-private fun BottomTabs(selected: MainTab, onSelect: (MainTab) -> Unit) {
+private fun BottomTabs(selected: MainTab, hasServer: Boolean, onSelect: (MainTab) -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f), shadowElevation = 12.dp) {
         Row(
             Modifier
                 .fillMaxWidth()
                 .padding(WindowInsets.navigationBars.asPaddingValues())
-                .height(58.dp),
+                .heightIn(min = 58.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TabButton("◉", "项目", selected == MainTab.CHATS, Modifier.weight(1f)) { onSelect(MainTab.CHATS) }
-            TabButton(">_", "Codex", selected == MainTab.CODEX, Modifier.weight(1f)) { onSelect(MainTab.CODEX) }
-            TabButton("▤", "文件", selected == MainTab.FILES, Modifier.weight(1f)) { onSelect(MainTab.FILES) }
-            TabButton("▥", "算力", selected == MainTab.GPU, Modifier.weight(1f)) { onSelect(MainTab.GPU) }
+            TabButton("◉", "项目", selected == MainTab.CHATS, Modifier.weight(1f), hasServer) { onSelect(MainTab.CHATS) }
+            TabButton(">_", "Codex", selected == MainTab.CODEX, Modifier.weight(1f), hasServer) { onSelect(MainTab.CODEX) }
+            TabButton("▧", "研记", selected == MainTab.YANJI, Modifier.weight(1f)) { onSelect(MainTab.YANJI) }
+            TabButton("▤", "文件", selected == MainTab.FILES, Modifier.weight(1f), hasServer) { onSelect(MainTab.FILES) }
+            TabButton("▥", "算力", selected == MainTab.GPU, Modifier.weight(1f), hasServer) { onSelect(MainTab.GPU) }
             TabButton("▣", "服务器", selected == MainTab.SERVERS, Modifier.weight(1f)) { onSelect(MainTab.SERVERS) }
         }
     }
@@ -340,21 +370,26 @@ private fun TabButton(
     label: String,
     selected: Boolean,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     Column(
         modifier
             .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, role = androidx.compose.ui.semantics.Role.Tab, onClick = onClick)
             .padding(horizontal = 4.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(symbol, fontSize = 18.sp, color = if (selected) AppleBlue else MaterialTheme.colorScheme.onSurfaceVariant)
+        val color = if (selected) AppleBlue else MaterialTheme.colorScheme.onSurfaceVariant
+        Text(symbol, fontSize = 18.sp, color = color.copy(alpha = if (enabled) 1f else 0.4f))
         Text(
             label,
-            fontSize = 10.sp,
+            fontSize = 11.sp,
+            lineHeight = 13.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            color = if (selected) AppleBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = color.copy(alpha = if (enabled) 1f else 0.4f),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -2888,7 +2923,7 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Codex 窗口", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Codex · Qoder CN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(
                     "${windows.size} / 6 · 服务器命令行",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2917,6 +2952,23 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
             }
         }
 
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = viewModel::createQodercnWindow, enabled = windows.size < 6 && !viewModel.busy) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Qoder CN")
+            }
+            TextButton(onClick = { viewModel.showCliSessionPicker("codex") }, enabled = !viewModel.busy) {
+                Text("恢复 Codex")
+            }
+            TextButton(onClick = { viewModel.showCliSessionPicker("qodercn") }, enabled = !viewModel.busy) {
+                Text("恢复 Qoder")
+            }
+        }
+
         if (windows.isNotEmpty()) {
             Row(
                 Modifier
@@ -2935,7 +2987,7 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
                         color = if (selected) AppleBlue else MaterialTheme.colorScheme.surface,
                     ) {
                         Text(
-                            window.title,
+                            if (window.title.startsWith(window.cliLabel)) window.title else "${window.cliLabel} · ${window.title}",
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                             color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface,
                             fontFamily = FontFamily.Monospace,
@@ -2959,13 +3011,13 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
                 }
                 Spacer(Modifier.height(18.dp))
                 Text(
-                    if (windows.isEmpty()) "创建第一个 Codex 窗口" else "选择一个 Codex 窗口",
+                    if (windows.isEmpty()) "创建命令行窗口" else "选择一个命令行窗口",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "每个窗口对应服务器上的独立 Codex CLI，会在切换页面或网络短暂断开时继续保留。",
+                    "支持 Codex 和 Qoder CN，可新建窗口或恢复已有对话。切换页面和短暂断网时会话继续保留。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp,
                 )
@@ -2983,11 +3035,86 @@ private fun CodexWindowsScreen(viewModel: AppViewModel) {
         }
     }
 
+    viewModel.cliSessionPickerMode?.let { mode ->
+        val label = if (mode == "qodercn") "Qoder CN" else "Codex"
+        var sessionSearch by remember(mode) { mutableStateOf("") }
+        val matchingSessions = viewModel.cliSessions.filter {
+            sessionSearch.isBlank() || "${it.title} ${it.projectPath} ${it.id}".contains(sessionSearch.trim(), ignoreCase = true)
+        }
+        AlertDialog(
+            onDismissRequest = viewModel::dismissCliSessionPicker,
+            title = { Text("恢复 $label 对话") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("选择已有对话继续，显示最近最多 200 条会话。", fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = sessionSearch,
+                        onValueChange = { sessionSearch = it },
+                        placeholder = { Text("搜索标题、项目或会话编号", fontSize = 12.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    when {
+                        viewModel.cliSessionsBusy -> {
+                            CircularProgressIndicator(Modifier.size(24.dp))
+                            Text("正在读取已有对话…", fontSize = 12.sp)
+                        }
+                        viewModel.cliSessionError != null -> {
+                            Text(viewModel.cliSessionError.orEmpty(), color = MaterialTheme.colorScheme.error)
+                            TextButton(onClick = { viewModel.showCliSessionPicker(mode) }) { Text("重试") }
+                        }
+                        viewModel.cliSessions.isEmpty() -> Text("这台服务器还没有可恢复的 $label 对话。")
+                        matchingSessions.isEmpty() -> Text("没有找到匹配的对话。")
+                        else -> LazyColumn(
+                            Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(matchingSessions, key = { it.id }) { session ->
+                                val existing = windows.any { it.id == session.windowId }
+                                val canAttach = session.windowId != null
+                                val enabled = !viewModel.busy &&
+                                    (existing || ((!session.running || canAttach) && windows.size < 6))
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth().clickable(enabled = enabled) {
+                                        viewModel.restoreCliSession(session)
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 1f else 0.45f),
+                                ) {
+                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(session.title, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        Text(
+                                            when {
+                                                existing -> "已接入 · 点击打开窗口"
+                                                canAttach && windows.size < 6 -> "服务器窗口仍在 · 点击接入"
+                                                session.running -> "原终端使用中"
+                                                windows.size >= 6 -> "已达到 6 个窗口上限"
+                                                else -> session.projectPath
+                                            },
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        )
+                                        if (session.updatedAt.isNotBlank()) {
+                                            Text("最近更新 ${formatCliSessionTime(session.updatedAt)}", fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = viewModel::dismissCliSessionPicker) { Text("关闭") } },
+        )
+    }
+
     deleteTarget?.let { window ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除 ${window.title}？") },
-            text = { Text("该窗口中的 Codex CLI 和对应 tmux 会话会结束。服务器项目文件不会被删除。") },
+            text = { Text("该窗口中的 ${window.cliLabel} 会结束；服务器上的项目文件和已有对话记录会保留。") },
             confirmButton = {
                 TextButton(onClick = {
                     deleteTarget = null
@@ -3071,8 +3198,8 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
         }
         val fallback = when (status) {
             TerminalStatus.Connecting -> "正在连接 ${window.title}…"
-            TerminalStatus.Connected -> "Codex 已连接，等待终端输出…"
-            TerminalStatus.Disconnected -> "Codex 窗口连接已结束"
+            TerminalStatus.Connected -> "${window.cliLabel} 已连接，等待终端输出…"
+            TerminalStatus.Disconnected -> "${window.cliLabel} 窗口连接已结束"
             is TerminalStatus.Error -> status.message
         }
         val terminalText = viewModel.codexTerminalText.ifBlank { fallback }
@@ -3150,20 +3277,23 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                 horizontalArrangement = Arrangement.spacedBy(1.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                CodexKeyButton("Alt+↑", connected) { viewModel.sendCodexKey("\u001b[1;3A") }
-                CodexKeyButton("1", connected) { viewModel.sendCodexKey("1") }
-                CodexKeyButton("2", connected) { viewModel.sendCodexKey("2") }
-                CodexKeyButton("3", connected) { viewModel.sendCodexKey("3") }
-                CodexKeyButton("/permissions", connected) {
-                    dismissKeyboard()
-                    viewModel.sendCodexPrompt("/permissions")
-                }
-                CodexKeyButton("/model", connected) {
-                    dismissKeyboard()
-                    viewModel.sendCodexPrompt("/model")
+                if (window.mode == "codex") {
+                    CodexKeyButton("Alt+↑", connected) { viewModel.sendCodexKey("\u001b[1;3A") }
+                    CodexKeyButton("1", connected) { viewModel.sendCodexKey("1") }
+                    CodexKeyButton("2", connected) { viewModel.sendCodexKey("2") }
+                    CodexKeyButton("3", connected) { viewModel.sendCodexKey("3") }
+                    CodexKeyButton("/permissions", connected) {
+                        dismissKeyboard()
+                        viewModel.sendCodexPrompt("/permissions")
+                    }
+                    CodexKeyButton("/model", connected) {
+                        dismissKeyboard()
+                        viewModel.sendCodexPrompt("/model")
+                    }
                 }
                 CodexKeyButton("Esc", connected) { viewModel.sendCodexKey("\u001b") }
                 CodexKeyButton("Tab", connected) { viewModel.sendCodexKey("\t") }
+                CodexKeyButton("回车", connected) { viewModel.sendCodexKey("\r") }
                 CodexKeyButton("↑", connected) { viewModel.sendCodexKey("\u001b[A") }
                 CodexKeyButton("↓", connected) { viewModel.sendCodexKey("\u001b[B") }
                 CodexKeyButton("←", connected) { viewModel.sendCodexKey("\u001b[D") }
@@ -3180,7 +3310,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                     },
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp, max = 132.dp),
                     enabled = connected,
-                    placeholder = { Text("输入给 Codex；回车换行，点右侧按钮发送", fontSize = 12.sp) },
+                    placeholder = { Text("输入给 ${window.cliLabel}；回车换行，点按钮发送", fontSize = 12.sp) },
                     minLines = 1,
                     maxLines = 5,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
@@ -3204,7 +3334,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                         .clip(CircleShape)
                         .background(if (sendEnabled) AppleBlue else MaterialTheme.colorScheme.surfaceVariant),
                 ) {
-                    Icon(Icons.Default.Send, contentDescription = "发送给 Codex", tint = Color.White, modifier = Modifier.size(19.dp))
+                    Icon(Icons.Default.Send, contentDescription = "发送给 ${window.cliLabel}", tint = Color.White, modifier = Modifier.size(19.dp))
                 }
             }
             Text(
@@ -3639,3 +3769,8 @@ private const val SB3_DOCS_URL = "https://stable-baselines3.readthedocs.io/en/ma
 private const val SMOL_COURSE_URL = "https://huggingface.co/learn/smol-course/unit0/1"
 private const val HF_DOCS_URL = "https://huggingface.co/docs"
 private const val RAG_TUTORIAL_URL = "https://vivy-yi.github.io/rag-tutorial/"
+
+private fun formatCliSessionTime(value: String): String = runCatching {
+    java.time.Instant.parse(value).atZone(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+}.getOrDefault(value.replace("T", " ").take(16))

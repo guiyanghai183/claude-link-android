@@ -4,6 +4,7 @@ import com.mobileclaude.app.data.Artifact
 import com.mobileclaude.app.data.ChatDetail
 import com.mobileclaude.app.data.ChatMessage
 import com.mobileclaude.app.data.ChatSummary
+import com.mobileclaude.app.data.CliSession
 import com.mobileclaude.app.data.DirectoryListing
 import com.mobileclaude.app.data.GpuInfo
 import com.mobileclaude.app.data.GpuProcessInfo
@@ -46,14 +47,28 @@ class BridgeApi(private val localPort: Int) {
         .getJSONArray("chats")
         .mapObjects(::parseChat)
 
-    fun createChat(projectPath: String, clientChatId: String, mode: String): ChatSummary = parseChat(
+    fun listCliSessions(mode: String): List<CliSession> {
+        require(mode == "codex" || mode == "qodercn")
+        return request("GET", "/v1/$mode/sessions").getJSONArray("sessions").mapObjects { json ->
+            CliSession(
+                id = json.getString("id"), mode = json.getString("mode"),
+                title = json.getString("title"), projectPath = json.getString("projectPath"),
+                updatedAt = json.optString("updatedAt"), preview = json.optString("preview"),
+                running = json.optBoolean("running"),
+                windowId = json.optString("windowId").takeIf(String::isNotBlank),
+            )
+        }
+    }
+
+    fun createChat(projectPath: String, clientChatId: String, mode: String, resumeSessionId: String? = null): ChatSummary = parseChat(
         request(
             "POST",
             "/v1/chats",
             JSONObject()
                 .put("projectPath", projectPath)
                 .put("clientChatId", clientChatId)
-                .put("mode", mode),
+                .put("mode", mode)
+                .put("resumeSessionId", resumeSessionId),
         )
     )
 
@@ -404,6 +419,7 @@ class BridgeApi(private val localPort: Int) {
         status = json.optString("status", "idle"),
         preview = json.optString("preview"),
         messageCount = json.optInt("messageCount"),
+        cliSessionId = json.optString("cliSessionId").takeIf(String::isNotBlank),
     )
 
     private fun parseMessage(json: JSONObject): ChatMessage {
