@@ -3309,7 +3309,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                         viewModel.updateCodexDraft(window.id, it.text)
                     },
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp, max = 132.dp),
-                    enabled = connected,
+                    enabled = connected && !viewModel.codexPromptSending,
                     placeholder = { Text("输入给 ${window.cliLabel}；回车换行，点按钮发送", fontSize = 12.sp) },
                     minLines = 1,
                     maxLines = 5,
@@ -3318,7 +3318,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.CodexTerminalPane(
                     shape = RoundedCornerShape(14.dp),
                 )
                 Spacer(Modifier.width(7.dp))
-                val sendEnabled = connected && input.text.isNotBlank() && input.composition == null
+                val sendEnabled = connected && !viewModel.codexPromptSending && input.text.isNotBlank() && input.composition == null
                 IconButton(
                     onClick = {
                         val submitted = input.text

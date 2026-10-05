@@ -37,6 +37,7 @@ import com.mobileclaude.app.ssh.SshTunnelManager
 import com.mobileclaude.app.ssh.SshTerminalSession
 import com.mobileclaude.app.ssh.TunnelConnection
 import com.mobileclaude.app.ssh.ReconnectDelayPolicy
+import com.mobileclaude.app.ssh.submitCliPrompt
 import com.mobileclaude.app.terminal.TerminalTextBuffer
 import com.mobileclaude.app.terminal.CodexTerminalBuffer
 import com.mobileclaude.app.update.GitHubUpdateManager
@@ -84,11 +85,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var terminalCompletionMarker: String? = null
     private val terminalBuffer = TerminalTextBuffer()
     private var codexReaderJob: Job? = null
+    private var codexInputJob: Job? = null
     private var codexSession: SshTerminalSession? = null
     private var codexGeneration = 0L
     private var codexColumns = CodexTerminalBuffer.DEFAULT_COLUMNS
     private var codexRows = CodexTerminalBuffer.DEFAULT_ROWS
     private val codexBuffer = CodexTerminalBuffer(codexColumns, codexRows)
+    private val codexInputMutex = Mutex()
+    var codexPromptSending by mutableStateOf(false)
+        private set
     private val reconnectMutex = Mutex()
     private var connectionGeneration = 0L
     private var activeChatGeneration = 0L
@@ -640,20 +645,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendCodexPrompt(text: String, onAccepted: () -> Unit = {}) {
+        if (codexPromptSending) return
         val opened = codexSession?.takeIf { it.isConnected } ?: run {
             errorMessage = "命令行窗口尚未连接"
             return
         }
         if (text.isBlank()) return
-        viewModelScope.launch {
+        val generation = codexGeneration
+        codexPromptSending = true
+        codexInputJob = viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) {
-                    opened.write("\u001b[200~${text.replace("\u001b", "")}\u001b[201~\r")
+                codexInputMutex.withLock {
+                    withContext(Dispatchers.IO) {
+                        submitCliPrompt(text, opened::write) {
+                            generation == codexGeneration && codexSession === opened && opened.isConnected
+                        }
+                    }
                 }
                 runCatching(onAccepted)
             } catch (error: Throwable) {
-                if (error !is CancellationException) {
+                if (error is CancellationException) throw error
+                if (generation == codexGeneration) {
                     codexTerminalStatus = TerminalStatus.Error(error.userMessage())
+                }
+            } finally {
+                if (generation == codexGeneration) {
+                    codexPromptSending = false
+                    codexInputJob = null
                 }
             }
         }
@@ -663,7 +681,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val opened = codexSession?.takeIf { it.isConnected } ?: return
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { opened.write(sequence) }
+                codexInputMutex.withLock {
+                    withContext(Dispatchers.IO) {
+                        if (codexSession === opened && opened.isConnected) opened.write(sequence)
+                    }
+                }
             } catch (error: Throwable) {
                 if (error !is CancellationException) {
                     codexTerminalStatus = TerminalStatus.Error(error.userMessage())
@@ -676,7 +698,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val opened = codexSession?.takeIf { it.isConnected } ?: return
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { opened.sendControl(code) }
+                codexInputMutex.withLock {
+                    withContext(Dispatchers.IO) {
+                        if (codexSession === opened && opened.isConnected) opened.sendControl(code)
+                    }
+                }
             } catch (error: Throwable) {
                 if (error !is CancellationException) {
                     codexTerminalStatus = TerminalStatus.Error(error.userMessage())
@@ -791,6 +817,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun stopCodexTerminal() {
         codexGeneration += 1
+        codexInputJob?.cancel()
+        codexInputJob = null
+        codexPromptSending = false
         codexReaderJob?.cancel()
         codexReaderJob = null
         codexSession?.close()

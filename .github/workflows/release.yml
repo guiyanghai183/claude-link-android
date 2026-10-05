@@ -91,7 +91,7 @@ jobs:
             --arg versionName "$VERSION_NAME" \
             --arg apkUrl "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$APK_NAME" \
             --arg sha256 "$SHA256" \
-            --arg releaseNotes "新增 Qoder CN 持久命令行窗口与 Codex/Qoder CN 历史会话恢复，可搜索并重新接入服务器上的已有 Claude Link 窗口。新增应用内研记网页，无需先连接 SSH；默认舒适字号，支持大字、双指缩放、全屏阅读与附件选择，切换页面保留阅读位置和输入内容。" \
+            --arg releaseNotes "修复 Codex 新建或重新连接窗口时的会话 UUID 无效报错；修复 Qoder CN 消息停留在输入框、没有提交和回复的问题。发送期间防止重复点击与快捷键交错；切换窗口或断线时保留未提交草稿。修正历史恢复列表对未绑定窗口的识别，保留已有 Qoder CN、会话恢复与应用内研记功能。" \
             '{versionCode:$versionCode,versionName:$versionName,apkUrl:$apkUrl,sha256:$sha256,releaseNotes:$releaseNotes}' \
             > latest.json
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
